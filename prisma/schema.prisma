@@ -1,0 +1,184 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// --- Enum định nghĩa theo thiết kế của bạn ---
+enum UserRole {
+  BUYER
+  SELLER
+  ADMIN
+}
+
+enum OrderStatus {
+  PENDING
+  CONFIRMED
+  SHIPPING
+  COMPLETED
+  CANCELLED
+}
+
+enum PaymentStatus {
+  PENDING
+  SUCCESS
+  FAILED
+}
+
+enum TargetType {
+  PRODUCT
+  AVATAR
+  PAYMENT_PROOF
+}
+
+// --- Các Model chính ---
+
+model User {
+  id            String    @id @default(cuid()) // Sử dụng cuid giống repo mẫu
+  email         String    @unique
+  password_hash String
+  role          UserRole  @default(BUYER)
+  full_name     String
+  phone_number  String?
+  is_active     Boolean   @default(true)
+  created_at    DateTime  @default(now())
+  updated_at    DateTime  @updatedAt
+
+  profile       Profile?
+  products      Product[]
+  buy_orders    Order[]         @relation("BuyerOrders")
+  sell_orders   Order[]         @relation("SellerOrders")
+  payments      Payment[]
+  sent_messages ChatMessage[]
+  conv_user1    Conversation[]  @relation("User1")
+  conv_user2    Conversation[]  @relation("User2")
+  reviews       Review[]
+}
+
+model Profile {
+  id          String   @id @default(cuid())
+  user_id     String   @unique
+  user        User     @relation(fields: [user_id], references: [id])
+  store_name  String
+  description String?
+  address     String?
+  is_verified Boolean  @default(false)
+}
+
+model Category {
+  id        Int        @id @default(autoincrement())
+  name      String
+  parent_id Int?
+  parent    Category?  @relation("SubCategories", fields: [parent_id], references: [id])
+  children  Category[] @relation("SubCategories")
+  products  Product[]
+}
+
+model Product {
+  id              String      @id @default(cuid())
+  seller_id       String
+  seller          User        @relation(fields: [seller_id], references: [id])
+  category_id     Int
+  category        Category    @relation(fields: [category_id], references: [id])
+  name            String
+  description     String?     @db.Text
+  reference_price Decimal     @db.Decimal(12, 2)
+  unit            String
+  stock_quantity  Decimal     @db.Decimal(12, 2)
+  location        String?
+  certification   String?
+  is_active       Boolean     @default(true)
+  created_at      DateTime    @default(now())
+  updated_at      DateTime    @updatedAt
+  order_items     OrderItem[]
+}
+
+model Order {
+  id                String      @id @default(cuid())
+  buyer_id          String
+  buyer             User        @relation("BuyerOrders", fields: [buyer_id], references: [id])
+  seller_id         String
+  seller            User        @relation("SellerOrders", fields: [seller_id], references: [id])
+  status            OrderStatus @default(PENDING)
+  final_total_price Decimal     @db.Decimal(12, 2)
+  shipping_address  String
+  notes             String?     @db.Text
+  created_at        DateTime    @default(now())
+  updated_at        DateTime    @updatedAt
+
+  order_items       OrderItem[]
+  payments          Payment[]
+  reviews           Review[]
+}
+
+model OrderItem {
+  id               String  @id @default(cuid())
+  order_id         String
+  order            Order   @relation(fields: [order_id], references: [id])
+  product_id       String
+  product          Product @relation(fields: [product_id], references: [id])
+  quantity         Decimal @db.Decimal(12, 2)
+  negotiated_price Decimal @db.Decimal(12, 2)
+}
+
+model Payment {
+  id               String        @id @default(cuid())
+  order_id         String
+  order            Order         @relation(fields: [order_id], references: [id])
+  user_id          String
+  user             User          @relation(fields: [user_id], references: [id])
+  payment_method   String        // Tiền mặt, Chuyển khoản...
+  amount           Decimal       @db.Decimal(12, 2)
+  transaction_code String?
+  status           PaymentStatus @default(PENDING)
+  payment_proof_url String?
+  created_at       DateTime      @default(now())
+}
+
+model Conversation {
+  id         String        @id @default(cuid())
+  user1_id   String
+  user1      User          @relation("User1", fields: [user1_id], references: [id])
+  user2_id   String
+  user2      User          @relation("User2", fields: [user2_id], references: [id])
+  messages   ChatMessage[]
+  created_at DateTime      @default(now())
+}
+
+model ChatMessage {
+  id              String       @id @default(cuid())
+  conversation_id String
+  conversation    Conversation @relation(fields: [conversation_id], references: [id])
+  sender_id       String
+  sender          User         @relation(fields: [sender_id], references: [id])
+  message_content String       @db.Text
+  created_at      DateTime     @default(now())
+}
+
+model Review {
+  id          String   @id @default(cuid())
+  order_id    String
+  order       Order    @relation(fields: [order_id], references: [id])
+  reviewer_id String
+  user        User     @relation(fields: [reviewer_id], references: [id])
+  rating      Int      @default(5)
+  comment     String?  @db.Text
+  created_at  DateTime @default(now())
+}
+
+model Attachment {
+  id          String     @id @default(cuid())
+  url         String
+  file_type   String
+  target_id   String     // ID của sản phẩm hoặc người dùng
+  target_type TargetType
+  created_at  DateTime   @default(now())
+}
