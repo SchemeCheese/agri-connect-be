@@ -10,6 +10,7 @@ generator client {
 
 datasource db {
   provider = "postgresql"
+  url      = env("DATABASE_URL")
 }
 
 // --- Enum định nghĩa theo thiết kế của bạn ---
@@ -99,6 +100,7 @@ model Product {
   created_at      DateTime    @default(now())
   updated_at      DateTime    @updatedAt
   order_items     OrderItem[]
+  attachments     Attachment[]
 }
 
 model Order {
@@ -181,4 +183,5 @@ model Attachment {
   target_id   String     // ID của sản phẩm hoặc người dùng
   target_type TargetType
   created_at  DateTime   @default(now())
+  product     Product?   @relation(fields: [target_id], references: [id])
 }
