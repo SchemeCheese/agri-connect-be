@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <style>
+    body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f9fafb; padding: 20px; }
+    .container { max-width: 600px; margin: 0 auto; background-color: #ffffff; padding: 30px; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); text-align: center; }
+    .logo { font-size: 24px; font-weight: bold; color: #16a34a; margin-bottom: 20px; }
+    .otp-box { background-color: #f0fdf4; border: 1px dashed #22c55e; padding: 15px; font-size: 32px; font-weight: bold; color: #15803d; letter-spacing: 5px; margin: 20px 0; border-radius: 8px; }
+    .footer { font-size: 12px; color: #6b7280; margin-top: 30px; border-top: 1px solid #e5e7eb; padding-top: 20px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="logo">🌿 Agri Connect</div>
+    <h2 style="color: #1f2937;">Xác thực địa chỉ Email</h2>
+    <p style="color: #4b5563;">Xin chào <strong>{{name}}</strong>,</p>
+    <p style="color: #4b5563;">Cảm ơn bạn đã đăng ký tài khoản. Vui lòng sử dụng mã OTP dưới đây để hoàn tất việc xác thực:</p>
+    
+    <div class="otp-box">{{code}}</div>
+    
+    <p style="color: #ef4444; font-size: 14px;"><em>* Mã này sẽ hết hạn sau {{expireTime}}. Vui lòng không chia sẻ mã này cho bất kỳ ai!</em></p>
+    
+    <div class="footer">
+      Đây là email tự động từ hệ thống Agri Connect. Vui lòng không trả lời email này.<br>
+      © 2026 Agri Connect. All rights reserved.
+    </div>
+  </div>
+</body>
+</html>

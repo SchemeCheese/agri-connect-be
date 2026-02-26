@@ -16,4 +16,10 @@ export class AuthController {
   login(@Body() dto: LoginDto) {
     return this.authService.login(dto);
   }
+
+  // THÊM API MỚI CHO OTP
+  @Post('verify-email')
+  verifyEmail(@Body() body: { userId: string; code: string }) {
+    return this.authService.verifyEmailOTP(body.userId, body.code);
+  }
 }

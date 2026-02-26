@@ -1,9 +1,6 @@
 // This is your Prisma schema file,
 // learn more about it in the docs: https://pris.ly/d/prisma-schema
 
-// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
-// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
-
 generator client {
   provider = "prisma-client-js"
 }
@@ -40,47 +37,63 @@ enum TargetType {
   PAYMENT_PROOF
 }
 
+// --- Enum mới cho OTP (Theo repo mẫu) ---
+enum AccountIdentifier {
+  EMAIL
+  PHONE
+}
+
 // --- Các Model chính ---
 
 model User {
-  id            String    @id @default(cuid()) // Sử dụng cuid giống repo mẫu
-  email         String    @unique
-  password_hash String
-  role          UserRole  @default(BUYER)
-  full_name     String
-  phone_number  String?
-  is_active     Boolean   @default(true)
-  created_at    DateTime  @default(now())
-  updated_at    DateTime  @updatedAt
+  id             String    @id @default(cuid())
+  email          String    @unique
+  password_hash  String
+  role           UserRole  @default(BUYER)
+  full_name      String
+  phone_number   String?
+  
+  // --- THÊM TRƯỜNG XÁC THỰC ---
+  verified_email Boolean   @default(false)
+  
+  is_active      Boolean   @default(true)
+  created_at     DateTime  @default(now())
+  updated_at     DateTime  @updatedAt
 
-  profile       Profile?
-  products      Product[]
-  buy_orders    Order[]         @relation("BuyerOrders")
-  sell_orders   Order[]         @relation("SellerOrders")
-  payments      Payment[]
-  sent_messages ChatMessage[]
-  conv_user1    Conversation[]  @relation("User1")
-  conv_user2    Conversation[]  @relation("User2")
-  reviews       Review[]
+  profile        Profile?
+  products       Product[]
+  buy_orders     Order[]         @relation("BuyerOrders")
+  sell_orders    Order[]         @relation("SellerOrders")
+  payments       Payment[]
+  sent_messages  ChatMessage[]
+  conv_user1     Conversation[]  @relation("User1")
+  conv_user2     Conversation[]  @relation("User2")
+  reviews        Review[]
+  
+  // Liên kết với bảng Verification
+  verifications  Verification[]
 }
 
 model Profile {
-  id          String   @id @default(cuid())
-  user_id     String   @unique
-  user        User     @relation(fields: [user_id], references: [id])
-  store_name  String
-  description String?
-  address     String?
-  is_verified Boolean  @default(false)
+  id             String   @id @default(cuid())
+  user_id        String   @unique
+  user           User     @relation(fields: [user_id], references: [id])
+  store_name     String?
+  address        String?
+  description    String?  @db.Text
+  is_verified    Boolean  @default(false)
+  created_at     DateTime @default(now())
+  updated_at     DateTime @updatedAt
 }
 
 model Category {
-  id        Int        @id @default(autoincrement())
-  name      String
-  parent_id Int?
-  parent    Category?  @relation("SubCategories", fields: [parent_id], references: [id])
-  children  Category[] @relation("SubCategories")
-  products  Product[]
+  id             Int       @id @default(autoincrement())
+  name           String    @unique
+  parent_id      Int?
+  parent         Category? @relation("SubCategories", fields: [parent_id], references: [id])
+  sub_categories Category[] @relation("SubCategories")
+  products       Product[]
+  created_at     DateTime  @default(now())
 }
 
 model Product {
@@ -91,16 +104,15 @@ model Product {
   category        Category    @relation(fields: [category_id], references: [id])
   name            String
   description     String?     @db.Text
-  reference_price Decimal     @db.Decimal(12, 2)
+  reference_price Decimal     @db.Decimal(10, 2)
+  stock_quantity  Decimal     @db.Decimal(10, 2)
   unit            String
-  stock_quantity  Decimal     @db.Decimal(12, 2)
   location        String?
   certification   String?
   is_active       Boolean     @default(true)
   created_at      DateTime    @default(now())
   updated_at      DateTime    @updatedAt
   order_items     OrderItem[]
-  attachments     Attachment[]
 }
 
 model Order {
@@ -110,12 +122,11 @@ model Order {
   seller_id         String
   seller            User        @relation("SellerOrders", fields: [seller_id], references: [id])
   status            OrderStatus @default(PENDING)
-  final_total_price Decimal     @db.Decimal(12, 2)
+  final_total_price Decimal     @db.Decimal(10, 2)
   shipping_address  String
-  notes             String?     @db.Text
+  tracking_code     String?
   created_at        DateTime    @default(now())
   updated_at        DateTime    @updatedAt
-
   order_items       OrderItem[]
   payments          Payment[]
   reviews           Review[]
@@ -127,22 +138,21 @@ model OrderItem {
   order            Order   @relation(fields: [order_id], references: [id])
   product_id       String
   product          Product @relation(fields: [product_id], references: [id])
-  quantity         Decimal @db.Decimal(12, 2)
-  negotiated_price Decimal @db.Decimal(12, 2)
+  quantity         Decimal @db.Decimal(10, 2)
+  negotiated_price Decimal @db.Decimal(10, 2)
 }
 
 model Payment {
-  id               String        @id @default(cuid())
-  order_id         String
-  order            Order         @relation(fields: [order_id], references: [id])
-  user_id          String
-  user             User          @relation(fields: [user_id], references: [id])
-  payment_method   String        // Tiền mặt, Chuyển khoản...
-  amount           Decimal       @db.Decimal(12, 2)
-  transaction_code String?
-  status           PaymentStatus @default(PENDING)
+  id                String        @id @default(cuid())
+  order_id          String
+  order             Order         @relation(fields: [order_id], references: [id])
+  payer_id          String
+  payer             User          @relation(fields: [payer_id], references: [id])
+  amount            Decimal       @db.Decimal(10, 2)
+  payment_method    String
+  status            PaymentStatus @default(PENDING)
   payment_proof_url String?
-  created_at       DateTime      @default(now())
+  created_at        DateTime      @default(now())
 }
 
 model Conversation {
@@ -180,8 +190,24 @@ model Attachment {
   id          String     @id @default(cuid())
   url         String
   file_type   String
-  target_id   String     // ID của sản phẩm hoặc người dùng
+  target_id   String
   target_type TargetType
   created_at  DateTime   @default(now())
-  product     Product?   @relation(fields: [target_id], references: [id])
+
+  @@index([target_id, target_type])
+}
+
+// --- THÊM BẢNG LƯU MÃ OTP (VERIFICATION) ---
+model Verification {
+  id         String            @id @default(cuid())
+  code       String
+  type       AccountIdentifier @default(EMAIL)
+  userId     String
+  expires_at DateTime
+  createdAt  DateTime          @default(now())
+  updatedAt  DateTime          @updatedAt
+  user       User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([code])
 }
