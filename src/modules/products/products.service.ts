@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, NotFoundException } from '@nestjs/common';
 import { DatabaseService } from '../../database/database.service';
 import { CreateProductDto } from './dtos/create-product.dto';
 
@@ -6,7 +6,7 @@ import { CreateProductDto } from './dtos/create-product.dto';
 export class ProductsService {
   constructor(private readonly db: DatabaseService) {}
 
-  // 1. Tạo sản phẩm mới (Cần ID người bán)
+  // 1. Tạo sản phẩm (Giữ nguyên)
   async create(sellerId: string, dto: CreateProductDto) {
     return this.db.product.create({
       data: {
@@ -17,29 +17,157 @@ export class ProductsService {
         unit: dto.unit,
         location: dto.location,
         certification: dto.certification,
-        seller_id: sellerId, // Liên kết với người bán đang đăng nhập
+        seller_id: sellerId,
         category_id: dto.category_id,
       },
     });
   }
 
-  // 2. Lấy danh sách sản phẩm của người bán
+  // 2. Lấy sản phẩm của Shop (Giữ nguyên)
   async findAllBySeller(sellerId: string) {
     const products = await this.db.product.findMany({
       where: { seller_id: sellerId },
       orderBy: { created_at: 'desc' },
-      include: { 
-        category: true,
-        // Thêm dòng này để lấy danh sách ảnh
-        // Lưu ý: Cần khai báo relation trong schema.prisma nếu dùng relation field
-        // Hoặc query thủ công nếu chưa có relation
-      },
+      include: { category: true },
     });
     
-    // Cách đơn giản nhất nếu chưa setup relation Attachment trong User/Product model:
-    // Lấy ảnh riêng và ghép vào (hoặc tốt nhất là thêm relation vào schema)
-    
-    // -- GIẢI PHÁP TỐT NHẤT: Sửa schema.prisma để thêm quan hệ --
+    // Lấy thêm ảnh nếu cần (để đơn giản ở bước này ta trả về luôn)
     return products;
+  }
+
+  // --- 3. THÊM MỚI: Lấy tất cả sản phẩm cho Trang chủ (Public) ---
+  async findAllPublic() {
+    // Lấy danh sách sản phẩm đang hoạt động (is_active = true)
+    const products = await this.db.product.findMany({
+      where: { is_active: true }, 
+      orderBy: { created_at: 'desc' },
+      include: { 
+        category: true, // Lấy tên danh mục
+        seller: {       // Lấy tên Shop
+          select: { 
+            full_name: true,
+            profile: true 
+          }
+        }
+      },
+    });
+
+    // Lấy ảnh từ bảng Attachment và ghép vào sản phẩm
+    const productsWithImages = await Promise.all(products.map(async (p) => {
+      const images = await this.db.attachment.findMany({
+        where: { 
+          target_id: p.id,
+          target_type: 'PRODUCT' 
+        },
+        select: { url: true }
+      });
+      
+      // Format lại dữ liệu cho đẹp để Frontend dễ dùng
+      return { 
+        id: p.id,
+        name: p.name,
+        slug: p.id, // Tạm dùng ID làm slug
+        price: Number(p.reference_price),
+        originalPrice: Number(p.reference_price) * 1.2, // Giả lập giá gốc cao hơn chút
+        category: p.category.name,
+        origin: p.location || 'Việt Nam',
+        // Nếu có ảnh thì lấy, không thì dùng ảnh mặc định
+        images: images.length > 0 ? images.map(img => img.url) : ['https://via.placeholder.com/300'],
+        description: p.description,
+        stock: Number(p.stock_quantity),
+        shopName: p.seller?.profile?.store_name || p.seller.full_name,
+        rating: 5, // Tạm fix cứng rating
+        reviewCount: 0,
+        sold: 0,
+      };
+    }));
+
+    return productsWithImages;
+  }
+  async findOnePublic(id: string) {
+    const p = await this.db.product.findUnique({
+      where: { id: id },
+      include: { 
+        category: true,
+        seller: {
+          include: { profile: true }
+        },
+        order_items: {
+          include: { order: true }
+        }
+      },
+    });
+
+    if (!p || !p.is_active) {
+      throw new NotFoundException('Sản phẩm không tồn tại hoặc đã ngừng bán');
+    }
+
+    // Lấy ảnh
+    const images = await this.db.attachment.findMany({
+      where: { target_id: p.id, target_type: 'PRODUCT' },
+      select: { url: true }
+    });
+
+    // Lấy Avatar shop
+    const shopAvatar = await this.db.attachment.findFirst({
+      where: { target_id: p.seller_id, target_type: 'AVATAR' }
+    });
+
+    // Lấy Đánh giá (Reviews) có kèm tên người đánh giá
+    const reviewsData = await this.db.review.findMany({
+      where: { order: { order_items: { some: { product_id: p.id } } } },
+      include: { user: true },
+      orderBy: { created_at: 'desc' }
+    });
+
+    // Tính toán số sao và lượt bán
+    const reviewCount = reviewsData.length;
+    const averageRating = reviewCount > 0 
+      ? reviewsData.reduce((acc, rev) => acc + rev.rating, 0) / reviewCount 
+      : 5;
+
+    const soldQuantity = p.order_items
+      .filter(item => item.order.status === 'COMPLETED')
+      .reduce((acc, item) => acc + Number(item.quantity), 0);
+
+    // Format danh sách đánh giá cho FE
+    const formattedReviews = reviewsData.map(r => ({
+      id: r.id,
+      userName: r.user.full_name,
+      avatar: '/images/default-avatar.png', // Tạm dùng ảnh mặc định
+      rating: r.rating,
+      comment: r.comment,
+      date: r.created_at
+    }));
+
+    return { 
+      id: p.id,
+      name: p.name,
+      slug: p.id,
+      price: Number(p.reference_price),
+      originalPrice: Number(p.reference_price) * 1.2,
+      category: p.category.name,
+      origin: p.location || 'khac',
+      images: images.length > 0 ? images.map(img => img.url) : ['/images/placeholder.jpg'],
+      description: p.description,
+      rating: Number(averageRating.toFixed(1)),
+      reviewCount: reviewCount,
+      sold: soldQuantity,
+      stock: Number(p.stock_quantity),
+      brand: p.seller?.profile?.store_name || 'Nông sản Việt',
+      shop: {
+        id: p.seller.id,
+        name: p.seller?.profile?.store_name || p.seller.full_name,
+        avatar: shopAvatar?.url || '/images/shop-placeholder.jpg',
+        location: p.seller?.profile?.address || 'Chưa cập nhật',
+        rating: 4.8, // Có thể tính trung bình rating shop sau
+        responseRate: '98%',
+        followers: 120,
+        joinDate: '1 năm trước',
+        totalProducts: 10
+      },
+      reviews: formattedReviews,
+      createdAt: p.created_at
+    };
   }
 }
