@@ -15,7 +15,6 @@ export class VerificationService {
     const code = this.generateOTP();
     const expires_at = new Date(Date.now() + 5 * 60 * 1000); // 5 phút
 
-    // Xóa các mã cũ của user này (nếu có) để tránh spam
     await this.databaseService.verification.deleteMany({
       where: { userId },
     });

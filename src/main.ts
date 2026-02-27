@@ -1,9 +1,14 @@
 import { NestFactory } from '@nestjs/core';
+import { NestExpressApplication } from '@nestjs/platform-express';
 import { AppModule } from './app.module';
 import { ValidationPipe } from '@nestjs/common';
+import { join } from 'path';
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  const app = await NestFactory.create<NestExpressApplication>(AppModule);
+
+  // Phục vụ file tĩnh từ thư mục /public (ví dụ: /placeholder.png)
+  app.useStaticAssets(join(__dirname, '..', 'public'));
 
   // 1. Kích hoạt kiểm tra dữ liệu đầu vào (Validation)
   app.useGlobalPipes(new ValidationPipe({
