@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Thông báo hoàn tiền - Agri Connect</title>
+</head>
+<body style="margin:0;padding:0;background:#f4f7f6;font-family:Arial,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f7f6;padding:40px 0;">
+    <tr>
+      <td align="center">
+        <table width="600" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:8px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.08);">
+
+          <!-- Header -->
+          <tr>
+            <td style="background:#e53e3e;padding:32px 40px;text-align:center;">
+              <h1 style="margin:0;color:#ffffff;font-size:24px;font-weight:700;">🔔 Thông báo hoàn tiền</h1>
+              <p style="margin:8px 0 0;color:#fed7d7;font-size:14px;">Agri Connect – Nền tảng nông sản sạch</p>
+            </td>
+          </tr>
+
+          <!-- Body -->
+          <tr>
+            <td style="padding:40px 40px 32px;">
+              <p style="margin:0 0 16px;font-size:16px;color:#2d3748;">Xin chào <strong>{{buyerName}}</strong>,</p>
+
+              <p style="margin:0 0 24px;font-size:15px;color:#4a5568;line-height:1.6;">
+                Chúng tôi rất tiếc khi thông báo rằng đơn hàng <strong>#{{orderId}}</strong> của bạn đã được xác nhận
+                <span style="color:#e53e3e;font-weight:600;">giao thất bại / thất lạc</span> bởi người bán.
+              </p>
+
+              <!-- Order card -->
+              <table width="100%" cellpadding="0" cellspacing="0" style="background:#fff5f5;border:1px solid #fed7d7;border-radius:6px;margin-bottom:24px;">
+                <tr>
+                  <td style="padding:20px 24px;">
+                    <table width="100%" cellpadding="0" cellspacing="0">
+                      <tr>
+                        <td style="font-size:14px;color:#718096;padding-bottom:10px;">Mã đơn hàng</td>
+                        <td align="right" style="font-size:14px;color:#2d3748;font-weight:600;padding-bottom:10px;">#{{orderId}}</td>
+                      </tr>
+                      <tr>
+                        <td style="font-size:14px;color:#718096;padding-bottom:10px;">Số tiền hoàn trả</td>
+                        <td align="right" style="font-size:18px;color:#e53e3e;font-weight:700;padding-bottom:10px;">{{amount}} đ</td>
+                      </tr>
+                      <tr>
+                        <td style="font-size:14px;color:#718096;">Phương thức thanh toán</td>
+                        <td align="right" style="font-size:14px;color:#2d3748;font-weight:600;">{{paymentMethod}}</td>
+                      </tr>
+                    </table>
+                  </td>
+                </tr>
+              </table>
+
+              <!-- Refund note -->
+              <table width="100%" cellpadding="0" cellspacing="0" style="background:#fffbeb;border-left:4px solid #f6ad55;border-radius:0 6px 6px 0;margin-bottom:24px;">
+                <tr>
+                  <td style="padding:16px 20px;">
+                    <p style="margin:0;font-size:14px;color:#744210;line-height:1.6;">
+                      ⏱ Hệ thống sẽ tiến hành hoàn lại số tiền <strong>{{amount}} đ</strong> về ví/tài khoản
+                      <strong>{{paymentMethod}}</strong> của bạn trong vòng <strong>3–5 ngày làm việc</strong>.
+                      Nếu sau thời gian này bạn chưa nhận được tiền, vui lòng liên hệ bộ phận hỗ trợ.
+                    </p>
+                  </td>
+                </tr>
+              </table>
+
+              <p style="margin:0 0 8px;font-size:14px;color:#718096;">
+                Chúng tôi xin lỗi vì sự bất tiện này và rất mong được phục vụ bạn trong những đơn hàng tiếp theo.
+              </p>
+              <p style="margin:0;font-size:14px;color:#718096;">
+                Trân trọng,<br/><strong style="color:#2d3748;">Đội ngũ Agri Connect</strong>
+              </p>
+            </td>
+          </tr>
+
+          <!-- Footer -->
+          <tr>
+            <td style="background:#f7fafc;padding:20px 40px;text-align:center;border-top:1px solid #e2e8f0;">
+              <p style="margin:0;font-size:12px;color:#a0aec0;">
+                © 2026 Agri Connect. Email này được gửi tự động, vui lòng không phản hồi trực tiếp.
+              </p>
+            </td>
+          </tr>
+
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>

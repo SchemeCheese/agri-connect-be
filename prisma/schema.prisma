@@ -18,17 +18,28 @@ enum UserRole {
 }
 
 enum OrderStatus {
-  PENDING
-  CONFIRMED
-  SHIPPING
-  COMPLETED
-  CANCELLED
+  PENDING          // Chờ người bán xác nhận
+  CONFIRMED        // Người bán đã xác nhận
+  SHIPPING         // Đang giao hàng
+  COMPLETED        // Hoàn thành (buyer xác nhận nhận)
+  CANCELLED        // Đã hủy
+  ISSUE_REPORTED   // Có sự cố (buyer báo chưa nhận)
+  FAILED           // Giao thất bại (sau khi seller xác nhận)
 }
 
 enum PaymentStatus {
-  PENDING
-  SUCCESS
-  FAILED
+  UNPAID    // Chưa thanh toán (COD chờ nhận / online chờ)
+  PAID      // Đã thanh toán xong
+  REFUNDING // Đang hoàn tiền (online đã trả trước, hàng thất lạc)
+  REFUNDED  // Đã hoàn tiền xong
+  FAILED    // Thanh toán thất bại
+}
+
+enum PaymentMethod {
+  COD      // Thanh toán khi nhận hàng
+  QR_CODE  // QR ngân hàng
+  MOMO     // Ví MoMo
+  ZALOPAY  // ZaloPay
 }
 
 enum TargetType {
@@ -116,17 +127,20 @@ model Product {
 }
 
 model Order {
-  id                String      @id @default(cuid())
+  id                String        @id @default(cuid())
   buyer_id          String
-  buyer             User        @relation("BuyerOrders", fields: [buyer_id], references: [id])
+  buyer             User          @relation("BuyerOrders", fields: [buyer_id], references: [id])
   seller_id         String
-  seller            User        @relation("SellerOrders", fields: [seller_id], references: [id])
-  status            OrderStatus @default(PENDING)
-  final_total_price Decimal     @db.Decimal(10, 2)
+  seller            User          @relation("SellerOrders", fields: [seller_id], references: [id])
+  status            OrderStatus   @default(PENDING)
+  payment_method    PaymentMethod @default(COD)
+  final_total_price Decimal       @db.Decimal(10, 2)
   shipping_address  String
   tracking_code     String?
-  created_at        DateTime    @default(now())
-  updated_at        DateTime    @updatedAt
+  note              String?       // Ghi chú khi báo sự cố
+  shipped_at        DateTime?     // Thời điểm chuyển sang SHIPPING — dùng để tính timer báo sự cố
+  created_at        DateTime      @default(now())
+  updated_at        DateTime      @updatedAt
   order_items       OrderItem[]
   payments          Payment[]
   reviews           Review[]
@@ -149,10 +163,12 @@ model Payment {
   payer_id          String
   payer             User          @relation(fields: [payer_id], references: [id])
   amount            Decimal       @db.Decimal(10, 2)
-  payment_method    String
-  status            PaymentStatus @default(PENDING)
+  payment_method    PaymentMethod
+  status            PaymentStatus @default(UNPAID)
   payment_proof_url String?
+  transaction_ref   String?       // Mã giao dịch từ MoMo/ZaloPay/QR
   created_at        DateTime      @default(now())
+  updated_at        DateTime      @updatedAt
 }
 
 model Conversation {

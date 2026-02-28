@@ -1,4 +1,4 @@
-import { Controller, Post, Get, Body, Request, UseGuards, Param } from '@nestjs/common';
+import { Controller, Post, Get, Patch, Delete, Body, Request, UseGuards, Param, Query } from '@nestjs/common';
 import { ProductsService } from './products.service';
 import { CreateProductDto } from './dtos/create-product.dto';
 import { AuthGuard } from '@nestjs/passport'; 
@@ -29,9 +29,31 @@ export class ProductsController {
     return this.productsService.findAllPublic();
   }
 
+  // API lấy trang chi tiết người bán (public) — phải đặt TRƯỚC :id
+  @Get('sellers/:id')
+  async getSellerById(@Param('id') sellerId: string) {
+    return this.productsService.findSellerById(sellerId);
+  }
+
   // API lấy chi tiết 1 sản phẩm
   @Get(':id')
   async getProductById(@Param('id') id: string) {
     return this.productsService.findOnePublic(id);
+  }
+
+  // PATCH /products/:id — Cập nhật sản phẩm
+  @UseGuards(AuthGuard('jwt'), RolesGuard)
+  @Roles(UserRole.SELLER)
+  @Patch(':id')
+  async updateProduct(@Request() req, @Param('id') id: string, @Body() dto: Partial<import('./dtos/create-product.dto').CreateProductDto>) {
+    return this.productsService.updateProduct(req.user.sub, id, dto);
+  }
+
+  // DELETE /products/:id — Ẩn sản phẩm
+  @UseGuards(AuthGuard('jwt'), RolesGuard)
+  @Roles(UserRole.SELLER)
+  @Delete(':id')
+  async deleteProduct(@Request() req, @Param('id') id: string) {
+    return this.productsService.deleteProduct(req.user.sub, id);
   }
 }

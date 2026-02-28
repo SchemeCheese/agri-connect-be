@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Thông báo hủy đơn hàng</title>
+  <style>
+    body { font-family: 'Segoe UI', Arial, sans-serif; background: #f4f6f8; margin: 0; padding: 0; }
+    .wrapper { max-width: 600px; margin: 40px auto; background: #fff; border-radius: 12px; overflow: hidden; box-shadow: 0 2px 12px rgba(0,0,0,0.08); }
+    .header { background: linear-gradient(135deg, #e53e3e, #c53030); padding: 36px 32px; text-align: center; }
+    .header h1 { color: #fff; margin: 0; font-size: 24px; letter-spacing: 0.5px; }
+    .header p { color: rgba(255,255,255,0.85); margin: 8px 0 0; font-size: 14px; }
+    .body { padding: 36px 40px; }
+    .body p { color: #4a5568; font-size: 15px; line-height: 1.7; margin: 0 0 16px; }
+    .order-id { display: inline-block; background: #fff5f5; color: #c53030; border: 1px solid #fed7d7; border-radius: 6px; padding: 4px 12px; font-weight: 600; font-size: 14px; }
+    .reason-box { background: #fffbeb; border-left: 4px solid #f6ad55; border-radius: 4px; padding: 16px 20px; margin: 20px 0; }
+    .reason-box p { margin: 0; color: #744210; font-size: 14px; }
+    .reason-box .label { font-weight: 700; color: #744210; margin-bottom: 6px; display: block; }
+    .apology { background: #f0fff4; border-radius: 8px; padding: 20px 24px; margin: 24px 0; text-align: center; }
+    .apology p { color: #276749; margin: 0; font-size: 14px; }
+    .footer { background: #f7fafc; padding: 24px 40px; text-align: center; }
+    .footer p { color: #a0aec0; font-size: 13px; margin: 0; }
+    .footer a { color: #48bb78; text-decoration: none; }
+  </style>
+</head>
+<body>
+  <div class="wrapper">
+    <div class="header">
+      <h1>🌿 Agri Connect</h1>
+      <p>Thông báo về đơn hàng của bạn</p>
+    </div>
+
+    <div class="body">
+      <p>Xin chào <strong>{{buyerName}}</strong>,</p>
+
+      <p>
+        Chúng tôi rất tiếc phải thông báo rằng đơn hàng của bạn đã bị hủy bởi người bán.
+      </p>
+
+      <p>
+        Mã đơn hàng: <span class="order-id">#{{orderId}}</span>
+      </p>
+
+      <div class="reason-box">
+        <span class="label">📋 Lý do từ người bán:</span>
+        <p>{{reason}}</p>
+      </div>
+
+      <div class="apology">
+        <p>
+          💚 Chúng tôi thành thật xin lỗi vì sự bất tiện này. Bạn hoàn toàn có thể
+          đặt lại đơn hàng với người bán khác hoặc liên hệ hỗ trợ nếu cần.
+        </p>
+      </div>
+
+      <p>
+        Nếu bạn có thắc mắc, vui lòng liên hệ đội hỗ trợ qua email hoặc tính năng
+        Chat trực tiếp trên ứng dụng.
+      </p>
+
+      <p>Trân trọng,<br /><strong>Đội ngũ Agri Connect</strong></p>
+    </div>
+
+    <div class="footer">
+      <p>© 2026 Agri Connect — Nền tảng kết nối nông sản Việt Nam</p>
+    </div>
+  </div>
+</body>
+</html>
