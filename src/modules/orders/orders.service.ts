@@ -68,6 +68,48 @@ export class OrdersService {
                         0
                     );
 
+                    // ── Áp dụng Voucher (nếu có) ──────────────────────────────
+                    let voucherId: string | null = null;
+                    let discountAmount = 0;
+                    let finalPrice = orderTotal;
+
+                    if (dto.voucher_code) {
+                        const now = new Date();
+                        const voucher = await prisma.voucher.findUnique({
+                            where: {
+                                seller_id_code: {
+                                    seller_id: sellerId,
+                                    code: dto.voucher_code.toUpperCase(),
+                                },
+                            },
+                        });
+
+                        if (
+                            voucher &&
+                            voucher.is_active &&
+                            now >= voucher.valid_from &&
+                            now <= voucher.valid_to &&
+                            voucher.used_count < voucher.usage_limit &&
+                            orderTotal >= Number(voucher.min_order_value)
+                        ) {
+                            if (voucher.discount_type === 'PERCENT') {
+                                discountAmount = (orderTotal * Number(voucher.discount_value)) / 100;
+                                discountAmount = Math.min(discountAmount, Number(voucher.max_discount_amount));
+                            } else {
+                                discountAmount = Number(voucher.discount_value);
+                            }
+                            discountAmount = Math.floor(Math.min(discountAmount, orderTotal));
+                            finalPrice = orderTotal - discountAmount;
+                            voucherId = voucher.id;
+
+                            // Tăng used_count
+                            await prisma.voucher.update({
+                                where: { id: voucher.id },
+                                data: { used_count: { increment: 1 } },
+                            });
+                        }
+                    }
+
                     // Tạo Đơn hàng và các Item chi tiết
                     const newOrder = await prisma.order.create({
                         data: {
@@ -76,7 +118,9 @@ export class OrdersService {
                             shipping_address: dto.shipping_address,
                             payment_method: dto.payment_method,
                             note: dto.note,
-                            final_total_price: orderTotal,
+                            final_total_price: finalPrice,
+                            voucher_id: voucherId,
+                            discount_amount: discountAmount,
                             status: 'PENDING',
                             order_items: {
                                 create: items.map((item) => ({
@@ -96,7 +140,7 @@ export class OrdersService {
                         data: {
                             order_id: newOrder.id,
                             payer_id: buyerId,
-                            amount: orderTotal,
+                            amount: finalPrice,
                             payment_method: dto.payment_method,
                             status: PaymentStatus.UNPAID,
                         },
@@ -428,6 +472,7 @@ export class OrdersService {
             where: { id: orderId },
             include: {
                 buyer: { select: { id: true, full_name: true, email: true } },
+                seller: { select: { id: true, full_name: true } },
             },
         });
 
@@ -443,6 +488,7 @@ export class OrdersService {
 
         const isPrepaid = order.payment_method !== PaymentMethod.COD;
         const newPaymentStatus = isPrepaid ? PaymentStatus.REFUNDING : PaymentStatus.FAILED;
+        const sellerName = order.seller?.full_name ?? 'Người bán';
 
         // Atomic: Order=FAILED + cập nhật Payment theo loại
         await this.databaseService.$transaction([
@@ -456,21 +502,33 @@ export class OrdersService {
             }),
         ]);
 
-        // Nếu đã thanh toán trước ⇒ gửi email thông báo hoàn tiền
-        if (isPrepaid && order.buyer?.email) {
-            await this.emailService.sendRefundNotificationEmail(
-                order.buyer.email,
-                order.buyer.full_name,
-                orderId,
-                order.final_total_price.toString(),
-                order.payment_method,
-            );
+        if (order.buyer?.email) {
+            if (isPrepaid) {
+                // Non-COD: đã trả tiền trước ⇒ gửi email thông báo hoàn tiền
+                await this.emailService.sendRefundNotificationEmail(
+                    order.buyer.email,
+                    order.buyer.full_name,
+                    orderId,
+                    order.final_total_price.toString(),
+                    order.payment_method,
+                );
+            } else {
+                // COD: chưa trả tiền ⇒ gửi email báo giao thất bại, không mất tiền
+                await this.emailService.sendOrderFailedCodEmail(
+                    order.buyer.email,
+                    order.buyer.full_name,
+                    sellerName,
+                    orderId,
+                );
+            }
+        } else {
+            console.warn(`[WARN] Buyer email not found for order #${orderId}`);
         }
 
         return {
             message: isPrepaid
                 ? 'Xác nhận thất lạc. Hệ thống đang tiến hành hoàn tiền cho người mua.'
-                : 'Xác nhận giao thất bại. Đơn hàng đã được đóng.',
+                : 'Xác nhận giao thất bại. Đơn hàng đã được đóng và người mua đã được thông báo.',
             payment_status: newPaymentStatus,
         };
     }

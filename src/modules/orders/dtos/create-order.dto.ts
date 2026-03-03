@@ -26,6 +26,14 @@ export class CreateOrderDto {
   @IsOptional()
   note?: string; // Ghi chú đơn hàng
 
+  /**
+   * Mã giảm giá (tùy chọn).
+   * Nếu có nhiều shop trong giỏ, hệ thống tự tìm shop sở hữu voucher này.
+   */
+  @IsString()
+  @IsOptional()
+  voucher_code?: string;
+
   @IsArray()
   @ValidateNested({ each: true })
   @Type(() => OrderItemDto)

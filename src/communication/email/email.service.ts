@@ -88,6 +88,31 @@ export class EmailService {
     }
   }
 
+  async sendOrderFailedCodEmail(
+    buyerEmail: string,
+    buyerName: string,
+    sellerName: string,
+    orderId: string,
+  ) {
+    try {
+      await this.mailerService.sendMail({
+        to: buyerEmail,
+        subject: `[Agri Connect] Đơn hàng #${orderId} giao thất bại`,
+        template: 'order-failed-cod',
+        context: {
+          buyerName: buyerName || 'bạn',
+          sellerName,
+          orderId,
+        },
+      });
+      this.logger.log(`[SUCCESS] Đã gửi email giao thất bại (COD) đơn #${orderId} đến buyer: ${buyerEmail}`);
+      return true;
+    } catch (error) {
+      this.logger.error(`[ERROR] Lỗi gửi email giao thất bại đến ${buyerEmail}`, error);
+      return false;
+    }
+  }
+
   async sendIssueReportedToBuyerEmail(
     buyerEmail: string,
     buyerName: string,
@@ -147,6 +172,33 @@ export class EmailService {
       return true;
     } catch (error) {
       this.logger.error(`[ERROR] Lỗi gửi email sự cố đến ${sellerEmail}`, error);
+      return false;
+    }
+  }
+
+  async sendSellerReplyEmail(
+    buyerEmail: string,
+    buyerName: string,
+    sellerName: string,
+    orderId: string,
+    reply: string,
+  ) {
+    try {
+      await this.mailerService.sendMail({
+        to: buyerEmail,
+        subject: `[Agri Connect] Người bán đã phản hồi đánh giá của bạn - Đơn #${orderId}`,
+        template: 'seller-reply',
+        context: {
+          buyerName: buyerName || 'bạn',
+          sellerName,
+          orderId,
+          reply,
+        },
+      });
+      this.logger.log(`[SUCCESS] Đã gửi email phản hồi review đơn #${orderId} đến buyer: ${buyerEmail}`);
+      return true;
+    } catch (error) {
+      this.logger.error(`[ERROR] Lỗi gửi email phản hồi review đến ${buyerEmail}`, error);
       return false;
     }
   }

@@ -8,9 +8,23 @@ import { OrdersModule } from './modules/orders/orders.module';
 import { ChatModule } from './modules/chat/chat.module';
 import { ReviewsModule } from './modules/reviews/reviews.module';
 import { ProfileModule } from './modules/profile/profile.module';
+import { SearchModule } from './modules/search/search.module';
+import { VouchersModule } from './modules/vouchers/vouchers.module';
+import { ShopsModule } from './modules/shops/shops.module';
 
 @Module({
-  imports: [DatabaseModule, AuthModule, ProductsModule, OrdersModule, ChatModule, ReviewsModule, ProfileModule],
+  imports: [
+    DatabaseModule,
+    AuthModule,
+    ProductsModule,
+    OrdersModule,
+    ChatModule,
+    ReviewsModule,
+    ProfileModule,
+    SearchModule,
+    VouchersModule,
+    ShopsModule,
+  ],
   controllers: [AppController],
   providers: [AppService],
 })

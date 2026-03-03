@@ -58,8 +58,11 @@ export class ProfileService {
     // Cập nhật hoặc tạo bảng Profile (store_name, address, description)
     const profileUpdateData: Record<string, any> = {};
     if (dto.store_name !== undefined) profileUpdateData.store_name = dto.store_name;
+    // Hỗ trợ cả address và store_address (FE có thể gửi bất kỳ field nào)
     if (dto.address !== undefined) profileUpdateData.address = dto.address;
+    if ((dto as any).store_address !== undefined) profileUpdateData.address = (dto as any).store_address;
     if (dto.description !== undefined) profileUpdateData.description = dto.description;
+    if ((dto as any).store_description !== undefined) profileUpdateData.description = (dto as any).store_description;
 
     if (Object.keys(profileUpdateData).length > 0) {
       await this.db.profile.upsert({
@@ -91,5 +94,15 @@ export class ProfileService {
     });
 
     return { avatar: fileUrl };
+  }
+
+  // ─── POST /profile/me/banner — Upload ảnh bìa (cover) ành cho seller ────
+  async updateCover(userId: string, fileUrl: string) {
+    await this.db.profile.upsert({
+      where: { user_id: userId },
+      update: { cover_url: fileUrl },
+      create: { user_id: userId, cover_url: fileUrl },
+    });
+    return { cover_url: fileUrl };
   }
 }

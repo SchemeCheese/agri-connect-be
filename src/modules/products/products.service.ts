@@ -116,9 +116,33 @@ export class ProductsService {
     // Lấy Đánh giá (Reviews) có kèm tên người đánh giá
     const reviewsData = await this.db.review.findMany({
       where: { order: { order_items: { some: { product_id: p.id } } } },
-      include: { user: true },
+      include: { user: { select: { id: true, full_name: true } } },
       orderBy: { created_at: 'desc' }
     });
+
+    // Lấy ảnh review và avatar của người đánh giá
+    const reviewIds = reviewsData.map((r) => r.id);
+    const reviewerIds = [...new Set(reviewsData.map((r) => r.reviewer_id))];
+
+    const [reviewAttachments, reviewerAvatars] = await Promise.all([
+      this.db.attachment.findMany({
+        where: { target_type: 'REVIEW', target_id: { in: reviewIds } },
+      }),
+      this.db.attachment.findMany({
+        where: { target_type: 'AVATAR', target_id: { in: reviewerIds } },
+      }),
+    ]);
+
+    const reviewImageMap = reviewAttachments.reduce((acc, a) => {
+      if (!acc[a.target_id]) acc[a.target_id] = [];
+      acc[a.target_id].push(a.url);
+      return acc;
+    }, {} as Record<string, string[]>);
+
+    const avatarMap = reviewerAvatars.reduce(
+      (acc, a) => ({ ...acc, [a.target_id]: a.url }),
+      {} as Record<string, string>,
+    );
 
     // Tính toán số sao và lượt bán
     const reviewCount = reviewsData.length;
@@ -134,10 +158,15 @@ export class ProductsService {
     const formattedReviews = reviewsData.map(r => ({
       id: r.id,
       userName: r.user.full_name,
-      avatar: '/images/default-avatar.png', // Tạm dùng ảnh mặc định
+      avatar: avatarMap[r.reviewer_id] ?? '/images/default-avatar.png',
       rating: r.rating,
       comment: r.comment,
-      date: r.created_at
+      date: r.created_at,
+      // Ảnh do buyer đăng tải khi review
+      review_images: reviewImageMap[r.id] ?? [],
+      // Phản hồi của người bán
+      seller_reply: r.seller_reply ?? null,
+      seller_replied_at: r.seller_replied_at ?? null,
     }));
 
     return { 

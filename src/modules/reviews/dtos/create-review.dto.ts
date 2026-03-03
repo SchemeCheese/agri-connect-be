@@ -1,4 +1,4 @@
-import { IsString, IsNotEmpty, IsInt, Min, Max, IsOptional } from 'class-validator';
+import { IsString, IsNotEmpty, IsInt, Min, Max, IsOptional, IsArray, IsUrl } from 'class-validator';
 
 export class CreateReviewDto {
   @IsString()
@@ -13,6 +13,12 @@ export class CreateReviewDto {
   @IsOptional()
   @IsString()
   comment?: string;
+
+  // Danh sách URL ảnh đính kèm review (FE upload ảnh trước, gửi URL vào đây)
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  image_urls?: string[];
 
   // FE có thể gửi kèm product_id — whitelist để không bị reject
   @IsOptional()

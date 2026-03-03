@@ -46,6 +46,12 @@ enum TargetType {
   PRODUCT
   AVATAR
   PAYMENT_PROOF
+  REVIEW
+}
+
+enum DiscountType {
+  PERCENT  // Giảm theo %
+  FIXED    // Giảm tiền cố định
 }
 
 // --- Enum mới cho OTP (Theo repo mẫu) ---
@@ -80,6 +86,8 @@ model User {
   conv_user1     Conversation[]  @relation("User1")
   conv_user2     Conversation[]  @relation("User2")
   reviews        Review[]
+  vouchers        Voucher[]
+  saved_vouchers  SavedVoucher[]
   
   // Liên kết với bảng Verification
   verifications  Verification[]
@@ -93,6 +101,9 @@ model Profile {
   address        String?
   description    String?  @db.Text
   is_verified    Boolean  @default(false)
+  cover_url      String?           // Ảnh bìa của shop
+  banners1       String[] @default([])  // Banner dưới thông tin shop (tối đa 6 ảnh)
+  banners2       String[] @default([])  // Banner dưới "Gợi ý cho bạn" (tối đa 6 ảnh)
   created_at     DateTime @default(now())
   updated_at     DateTime @updatedAt
 }
@@ -139,6 +150,9 @@ model Order {
   tracking_code     String?
   note              String?       // Ghi chú khi báo sự cố
   shipped_at        DateTime?     // Thời điểm chuyển sang SHIPPING — dùng để tính timer báo sự cố
+  voucher_id        String?       // Voucher đã áp dụng
+  voucher           Voucher?      @relation(fields: [voucher_id], references: [id])
+  discount_amount   Decimal?      @db.Decimal(10, 2)  // Số tiền đã giảm
   created_at        DateTime      @default(now())
   updated_at        DateTime      @updatedAt
   order_items       OrderItem[]
@@ -192,14 +206,16 @@ model ChatMessage {
 }
 
 model Review {
-  id          String   @id @default(cuid())
-  order_id    String
-  order       Order    @relation(fields: [order_id], references: [id])
-  reviewer_id String
-  user        User     @relation(fields: [reviewer_id], references: [id])
-  rating      Int      @default(5)
-  comment     String?  @db.Text
-  created_at  DateTime @default(now())
+  id                  String    @id @default(cuid())
+  order_id            String
+  order               Order     @relation(fields: [order_id], references: [id])
+  reviewer_id         String
+  user                User      @relation(fields: [reviewer_id], references: [id])
+  rating              Int       @default(5)
+  comment             String?   @db.Text
+  seller_reply        String?   @db.Text
+  seller_replied_at   DateTime?
+  created_at          DateTime  @default(now())
 }
 
 model Attachment {
@@ -211,6 +227,41 @@ model Attachment {
   created_at  DateTime   @default(now())
 
   @@index([target_id, target_type])
+}
+
+model Voucher {
+  id                 String       @id @default(cuid())
+  seller_id          String
+  seller             User         @relation(fields: [seller_id], references: [id])
+  code               String       // Mã voucher (unique per seller)
+  discount_type      DiscountType
+  discount_value     Decimal      @db.Decimal(10, 2)  // Ví dụ: 10 (%) hoặc 50000 (đồng)
+  min_order_value    Decimal      @db.Decimal(10, 2)  // Đơn tối thiểu
+  max_discount_amount Decimal     @db.Decimal(10, 2)  // Giảm tối đa (dùng khi PERCENT)
+  valid_from         DateTime
+  valid_to           DateTime
+  usage_limit        Int          @default(100)
+  used_count         Int          @default(0)
+  is_active          Boolean      @default(true)
+  created_at         DateTime     @default(now())
+  updated_at         DateTime     @updatedAt
+  saved_vouchers     SavedVoucher[]
+  orders             Order[]
+
+  @@unique([seller_id, code])  // Mã unique theo từng shop
+  @@index([seller_id])
+  @@index([code])
+}
+
+model SavedVoucher {
+  id         String   @id @default(cuid())
+  user_id    String
+  user       User     @relation(fields: [user_id], references: [id])
+  voucher_id String
+  voucher    Voucher  @relation(fields: [voucher_id], references: [id])
+  created_at DateTime @default(now())
+
+  @@unique([user_id, voucher_id])  // Mỗi user chỉ lưu 1 lần
 }
 
 // --- THÊM BẢNG LƯU MÃ OTP (VERIFICATION) ---

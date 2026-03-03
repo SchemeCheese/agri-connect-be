@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Người bán đã phản hồi đánh giá của bạn</title>
+  <style>
+    body { font-family: 'Segoe UI', Arial, sans-serif; background: #f4f6f8; margin: 0; padding: 0; }
+    .wrapper { max-width: 600px; margin: 40px auto; background: #fff; border-radius: 12px; overflow: hidden; box-shadow: 0 2px 12px rgba(0,0,0,0.08); }
+    .header { background: linear-gradient(135deg, #38a169, #276749); padding: 36px 32px; text-align: center; }
+    .header h1 { color: #fff; margin: 0; font-size: 24px; letter-spacing: 0.5px; }
+    .header p { color: rgba(255,255,255,0.85); margin: 8px 0 0; font-size: 14px; }
+    .body { padding: 36px 40px; }
+    .body p { color: #4a5568; font-size: 15px; line-height: 1.7; margin: 0 0 16px; }
+    .order-id { display: inline-block; background: #f0fff4; color: #276749; border: 1px solid #9ae6b4; border-radius: 6px; padding: 4px 12px; font-weight: 600; font-size: 14px; }
+    .reply-box { background: #f0fff4; border-left: 4px solid #48bb78; border-radius: 4px; padding: 20px 24px; margin: 20px 0; }
+    .reply-box .label { font-weight: 700; color: #276749; margin-bottom: 10px; display: block; font-size: 14px; }
+    .reply-box p { margin: 0; color: #2d3748; font-size: 15px; line-height: 1.7; }
+    .info-box { background: #fffbeb; border-radius: 8px; padding: 16px 20px; margin: 20px 0; }
+    .info-box p { margin: 0; color: #744210; font-size: 14px; }
+    .footer { background: #f7fafc; padding: 24px 40px; text-align: center; }
+    .footer p { color: #a0aec0; font-size: 13px; margin: 0; }
+    .footer a { color: #48bb78; text-decoration: none; }
+  </style>
+</head>
+<body>
+  <div class="wrapper">
+    <div class="header">
+      <h1>🌿 Agri Connect</h1>
+      <p>Người bán đã phản hồi đánh giá của bạn</p>
+    </div>
+
+    <div class="body">
+      <p>Xin chào <strong>{{buyerName}}</strong>,</p>
+
+      <p>
+        Người bán <strong>{{sellerName}}</strong> vừa gửi phản hồi cho đánh giá
+        của bạn trong đơn hàng:
+      </p>
+
+      <p>
+        Mã đơn hàng: <span class="order-id">#{{orderId}}</span>
+      </p>
+
+      <div class="reply-box">
+        <span class="label">💬 Phản hồi từ {{sellerName}}:</span>
+        <p>{{reply}}</p>
+      </div>
+
+      <div class="info-box">
+        <p>
+          💡 Bạn có thể xem lại đánh giá và phản hồi này trong mục
+          <strong>"Đánh giá của tôi"</strong> trên trang hồ sơ cá nhân hoặc
+          trang chi tiết sản phẩm.
+        </p>
+      </div>
+
+      <p>
+        Cảm ơn bạn đã đồng hành cùng <strong>Agri Connect</strong>. Đánh giá của
+        bạn giúp cải thiện chất lượng dịch vụ và hỗ trợ cộng đồng nông sản Việt Nam.
+      </p>
+    </div>
+
+    <div class="footer">
+      <p>© 2025 Agri Connect · <a href="#">Chính sách bảo mật</a> · <a href="#">Hỗ trợ</a></p>
+    </div>
+  </div>
+</body>
+</html>

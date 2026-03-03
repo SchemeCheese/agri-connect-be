@@ -70,4 +70,58 @@ export class ProfileController {
     const fileUrl = `/uploads/avatars/${file.filename}`;
     return this.profileService.updateAvatar(req.user.sub, fileUrl);
   }
+
+  /**
+   * PATCH /profile/update — Cập nhật tổng hợp: text fields + avatar tuỳ chọn
+   * Content-Type: multipart/form-data
+   * Fields: full_name, phone_number, store_name, address (hoặc store_address),
+   *         description (hoặc store_description)
+   * File field (optional): "avatar"
+   *
+   * Đây là endpoint FE nên dùng để cập nhật profile (không cần gọi 2 request riêng).
+   */
+  @Patch('update')
+  @UseInterceptors(
+    FileInterceptor('avatar', {
+      storage: avatarStorage,
+      fileFilter: imageFileFilter,
+      limits: { fileSize: 5 * 1024 * 1024 },
+    }),
+  )
+  async updateFull(
+    @Request() req,
+    @Body() dto: UpdateProfileDto,
+    @UploadedFile() file?: Express.Multer.File,
+  ) {
+    const updatedProfile = await this.profileService.updateProfile(req.user.sub, dto);
+
+    if (file) {
+      const fileUrl = `/uploads/avatars/${file.filename}`;
+      await this.profileService.updateAvatar(req.user.sub, fileUrl);
+      return { ...updatedProfile, avatar: fileUrl };
+    }
+
+    return updatedProfile;
+  }
+
+  /**
+   * POST /profile/me/banner — Upload ảnh bìa shop (seller)
+   * Content-Type: multipart/form-data, field: "file"
+   */
+  @Post('me/banner')
+  @UseInterceptors(
+    FileInterceptor('file', {
+      storage: avatarStorage,
+      fileFilter: imageFileFilter,
+      limits: { fileSize: 5 * 1024 * 1024 },
+    }),
+  )
+  async uploadBanner(
+    @Request() req,
+    @UploadedFile() file: Express.Multer.File,
+  ) {
+    if (!file) throw new BadRequestException('Không có file được gửi lên.');
+    const fileUrl = `/uploads/avatars/${file.filename}`;
+    return this.profileService.updateCover(req.user.sub, fileUrl);
+  }
 }
