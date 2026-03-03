@@ -15,72 +15,79 @@ export class OrdersService {
     ) { }
 
     async checkout(buyerId: string, dto: CreateOrderDto) {
-        if (!dto.items || dto.items.length === 0) {
+        if (!dto.seller_orders || dto.seller_orders.length === 0) {
             throw new BadRequestException('Giỏ hàng của bạn đang trống.');
         }
 
-        // 1. Tra cứu seller_id của từng sản phẩm từ DB
-        const productIds = dto.items.map((item) => item.product_id);
-        const products = await this.databaseService.product.findMany({
-            where: { id: { in: productIds } },
-            select: { id: true, seller_id: true },
+        // ── Pre-validate: kiểm tra tất cả sản phẩm tồn tại và đúng shop ────────────
+        const allProductIds = dto.seller_orders.flatMap((so) => so.items.map((i) => i.product_id));
+        const dbProducts = await this.databaseService.product.findMany({
+            where: { id: { in: allProductIds } },
+            select: { id: true, seller_id: true, is_active: true },
         });
 
-        if (products.length !== productIds.length) {
-            throw new NotFoundException('Một hoặc nhiều sản phẩm không tồn tại trong hệ thống.');
+        if (dbProducts.length !== allProductIds.length) {
+            throw new NotFoundException('Một hoặc nhiều sản phẩm không tồn tại.');
         }
 
-        const productSellerMap = new Map(products.map((p) => [p.id, p.seller_id]));
+        const productMap = new Map(dbProducts.map((p) => [p.id, p]));
 
-        // 2. Nhóm các sản phẩm theo seller_id (Shop) — lấy từ DB, không từ client
-        const itemsBySeller = dto.items.reduce((acc, item) => {
-            const sellerId = productSellerMap.get(item.product_id)!;
-            if (!acc[sellerId]) {
-                acc[sellerId] = [];
+        // Xác nhận sản phẩm thuộc đúng seller và đang active
+        for (const sellerOrder of dto.seller_orders) {
+            for (const item of sellerOrder.items) {
+                const p = productMap.get(item.product_id)!;
+                if (!p.is_active) {
+                    throw new BadRequestException(`Sản phẩm ${item.product_id} đã ngừng bán.`);
+                }
+                if (p.seller_id !== sellerOrder.seller_id) {
+                    throw new BadRequestException(
+                        `Sản phẩm ${item.product_id} không thuộc shop ${sellerOrder.seller_id}.`
+                    );
+                }
             }
-            acc[sellerId].push(item);
-            return acc;
-        }, {} as Record<string, typeof dto.items>);
+        }
 
         try {
-            // 2. Sử dụng Prisma Transaction để đảm bảo tính toàn vẹn dữ liệu
             const createdOrders = await this.databaseService.$transaction(async (prisma) => {
-                const results: any[] = [];
+                const results: {
+                    seller_id: string;
+                    order_id: string;
+                    subtotal: number;
+                    discount: number;
+                    final: number;
+                }[] = [];
 
-                for (const [sellerId, items] of Object.entries(itemsBySeller)) {
-                    // KIỂM TRA QUAN TRỌNG: Xác thực Seller ID có tồn tại trong DB không
+                for (const sellerOrder of dto.seller_orders) {
+                    const { seller_id: sellerId, items, voucher_code } = sellerOrder;
+
+                    // Xác thực seller tồn tại
                     const seller = await prisma.user.findUnique({
                         where: { id: sellerId },
-                        select: { id: true, role: true }
+                        select: { id: true, role: true },
                     });
-
                     if (!seller) {
-                        throw new NotFoundException(`Người bán (ID: ${sellerId}) không tồn tại trong hệ thống.`);
+                        throw new NotFoundException(`Người bán (ID: ${sellerId}) không tồn tại.`);
                     }
-
                     if (seller.role !== 'SELLER') {
-                        throw new BadRequestException(`Người dùng (ID: ${sellerId}) không có quyền bán hàng.`);
+                        throw new BadRequestException(`ID ${sellerId} không phải SELLER.`);
                     }
 
-                    // Tính tổng tiền cho đơn hàng của Shop này
-                    const orderTotal = items.reduce(
+                    // Tính subtotal
+                    const subtotal = items.reduce(
                         (sum, item) => sum + Number(item.price) * Number(item.quantity),
-                        0
+                        0,
                     );
 
-                    // ── Áp dụng Voucher (nếu có) ──────────────────────────────
+                    // ── Validate + áp dụng voucher riêng của shop này ─────────────────
                     let voucherId: string | null = null;
                     let discountAmount = 0;
-                    let finalPrice = orderTotal;
+                    let finalPrice = subtotal;
 
-                    if (dto.voucher_code) {
+                    if (voucher_code) {
                         const now = new Date();
                         const voucher = await prisma.voucher.findUnique({
                             where: {
-                                seller_id_code: {
-                                    seller_id: sellerId,
-                                    code: dto.voucher_code.toUpperCase(),
-                                },
+                                seller_id_code: { seller_id: sellerId, code: voucher_code.toUpperCase() },
                             },
                         });
 
@@ -90,27 +97,31 @@ export class OrdersService {
                             now >= voucher.valid_from &&
                             now <= voucher.valid_to &&
                             voucher.used_count < voucher.usage_limit &&
-                            orderTotal >= Number(voucher.min_order_value)
+                            subtotal >= Number(voucher.min_order_value)
                         ) {
                             if (voucher.discount_type === 'PERCENT') {
-                                discountAmount = (orderTotal * Number(voucher.discount_value)) / 100;
+                                discountAmount = (subtotal * Number(voucher.discount_value)) / 100;
                                 discountAmount = Math.min(discountAmount, Number(voucher.max_discount_amount));
                             } else {
                                 discountAmount = Number(voucher.discount_value);
                             }
-                            discountAmount = Math.floor(Math.min(discountAmount, orderTotal));
-                            finalPrice = orderTotal - discountAmount;
+                            discountAmount = Math.floor(Math.min(discountAmount, subtotal));
+                            finalPrice = subtotal - discountAmount;
                             voucherId = voucher.id;
 
-                            // Tăng used_count
                             await prisma.voucher.update({
                                 where: { id: voucher.id },
                                 data: { used_count: { increment: 1 } },
                             });
+                        } else if (voucher_code) {
+                            // Mã có nhưng không hợp lệ — throw lỗi rõ ràng cho FE
+                            throw new BadRequestException(
+                                `Mã giảm giá "${voucher_code}" không hợp lệ hoặc không thể áp dụng cho đơn này.`
+                            );
                         }
                     }
 
-                    // Tạo Đơn hàng và các Item chi tiết
+                    // Tạo Order
                     const newOrder = await prisma.order.create({
                         data: {
                             buyer_id: buyerId,
@@ -130,12 +141,9 @@ export class OrdersService {
                                 })),
                             },
                         },
-                        include: {
-                            order_items: true,
-                        },
                     });
 
-                    // Tạo bản ghi Payment khởi tạo (UNPAID)
+                    // Tạo Payment
                     await prisma.payment.create({
                         data: {
                             order_id: newOrder.id,
@@ -146,27 +154,34 @@ export class OrdersService {
                         },
                     });
 
-                    results.push(newOrder);
+                    results.push({
+                        seller_id: sellerId,
+                        order_id: newOrder.id,
+                        subtotal,
+                        discount: discountAmount,
+                        final: finalPrice,
+                    });
                 }
 
                 return results;
             });
 
+            const totalPaid = createdOrders.reduce((sum, o) => sum + o.final, 0);
+
             return {
                 message: 'Đặt hàng thành công!',
-                total_orders: createdOrders.length,
-                data: createdOrders,
+                order_ids: createdOrders.map((o) => o.order_id),
+                total_paid: totalPaid,
+                seller_orders: createdOrders,
             };
 
         } catch (error) {
-            // Trả về thông báo lỗi cụ thể thay vì log chung chung
             if (error instanceof NotFoundException || error instanceof BadRequestException) {
                 throw error;
             }
-
-            console.error("[ORDER_ERROR]:", error);
+            console.error('[ORDER_ERROR]:', error);
             throw new BadRequestException(
-                'Có lỗi xảy ra trong quá trình tạo đơn hàng. Vui lòng làm mới giỏ hàng và thử lại.'
+                'Có lỗi xảy ra trong quá trình tạo đơn hàng. Vui lòng làm mới giỏ hàng và thử lại.',
             );
         }
     }

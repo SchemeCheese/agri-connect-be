@@ -35,54 +35,75 @@ export class ProductsService {
     return products;
   }
 
-  // --- 3. THÊM MỚI: Lấy tất cả sản phẩm cho Trang chủ (Public) ---
+  // --- 3. Lấy tất cả sản phẩm cho Trang chủ (Public) ---
   async findAllPublic() {
-    // Lấy danh sách sản phẩm đang hoạt động (is_active = true)
     const products = await this.db.product.findMany({
-      where: { is_active: true }, 
+      where: { is_active: true },
       orderBy: { created_at: 'desc' },
-      include: { 
-        category: true, // Lấy tên danh mục
-        seller: {       // Lấy tên Shop
-          select: { 
+      include: {
+        category: { select: { name: true } },
+        seller: {
+          select: {
+            id: true,
             full_name: true,
-            profile: true 
-          }
-        }
+            profile: { select: { store_name: true } },
+          },
+        },
       },
     });
 
-    // Lấy ảnh từ bảng Attachment và ghép vào sản phẩm
-    const productsWithImages = await Promise.all(products.map(async (p) => {
-      const images = await this.db.attachment.findMany({
-        where: { 
-          target_id: p.id,
-          target_type: 'PRODUCT' 
-        },
-        select: { url: true }
-      });
-      
-      // Format lại dữ liệu cho đẹp để Frontend dễ dùng
-      return { 
-        id: p.id,
-        name: p.name,
-        slug: p.id, // Tạm dùng ID làm slug
-        price: Number(p.reference_price),
-        originalPrice: Number(p.reference_price) * 1.2, // Giả lập giá gốc cao hơn chút
-        category: p.category.name,
-        origin: p.location || 'Việt Nam',
-        // Nếu có ảnh thì lấy, không thì dùng ảnh mặc định
-        images: images.length > 0 ? images.map(img => img.url) : ['https://via.placeholder.com/300'],
-        description: p.description,
-        stock: Number(p.stock_quantity),
-        shopName: p.seller?.profile?.store_name || p.seller.full_name,
-        rating: 5, // Tạm fix cứng rating
-        reviewCount: 0,
-        sold: 0,
-      };
-    }));
+    if (products.length === 0) return [];
 
-    return productsWithImages;
+    // Batch load ảnh sản phẩm (1 query thay vì N queries)
+    const productIds = products.map((p) => p.id);
+    const sellerIds = [...new Set(products.map((p) => p.seller_id))];
+
+    const [allImages, sellerAvatars] = await Promise.all([
+      this.db.attachment.findMany({
+        where: { target_id: { in: productIds }, target_type: 'PRODUCT' },
+        select: { target_id: true, url: true },
+      }),
+      this.db.attachment.findMany({
+        where: { target_id: { in: sellerIds }, target_type: 'AVATAR' },
+        select: { target_id: true, url: true },
+      }),
+    ]);
+
+    // Build maps
+    const imageMap = allImages.reduce((acc, a) => {
+      if (!acc[a.target_id]) acc[a.target_id] = [];
+      acc[a.target_id].push(a.url);
+      return acc;
+    }, {} as Record<string, string[]>);
+
+    const avatarMap = sellerAvatars.reduce(
+      (acc, a) => ({ ...acc, [a.target_id]: a.url }),
+      {} as Record<string, string>,
+    );
+
+    return products.map((p) => ({
+      id: p.id,
+      name: p.name,
+      slug: p.id,
+      price: Number(p.reference_price),
+      originalPrice: Number(p.reference_price) * 1.2,
+      category: p.category.name,
+      origin: p.location || 'Việt Nam',
+      images: imageMap[p.id]?.length ? imageMap[p.id] : ['https://via.placeholder.com/300'],
+      description: p.description,
+      stock: Number(p.stock_quantity),
+      // Backward-compat field
+      shopName: p.seller?.profile?.store_name || p.seller.full_name,
+      // Structured shop object — FE dùng để group giỏ hàng + hiển thị xếp hàng
+      shop: {
+        id: p.seller_id,
+        store_name: p.seller?.profile?.store_name || p.seller.full_name,
+        avatar_url: avatarMap[p.seller_id] ?? null,
+      },
+      rating: 5,
+      reviewCount: 0,
+      sold: 0,
+    }));
   }
   async findOnePublic(id: string) {
     const p = await this.db.product.findUnique({
