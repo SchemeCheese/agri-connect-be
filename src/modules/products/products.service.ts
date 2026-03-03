@@ -87,14 +87,17 @@ export class ProductsService {
       slug: p.id,
       price: Number(p.reference_price),
       originalPrice: Number(p.reference_price) * 1.2,
+      unit: p.unit,
       category: p.category.name,
       origin: p.location || 'Việt Nam',
       images: imageMap[p.id]?.length ? imageMap[p.id] : ['https://via.placeholder.com/300'],
       description: p.description,
       stock: Number(p.stock_quantity),
-      // Backward-compat field
+      // Top-level seller_id — FE có thể dùng làm fallback
+      seller_id: p.seller_id,
+      // Backward-compat
       shopName: p.seller?.profile?.store_name || p.seller.full_name,
-      // Structured shop object — FE dùng để group giỏ hàng + hiển thị xếp hàng
+      // Structured shop object — FE dùng để group giỏ hàng
       shop: {
         id: p.seller_id,
         store_name: p.seller?.profile?.store_name || p.seller.full_name,
@@ -207,9 +210,9 @@ export class ProductsService {
       brand: p.seller?.profile?.store_name || 'Nông sản Việt',
       shop: {
         id: p.seller.id,
-        name: p.seller?.profile?.store_name || p.seller.full_name,
-        avatar: shopAvatar?.url || '/images/shop-placeholder.jpg',
-        location: p.seller?.profile?.address || 'Chưa cập nhật',
+        store_name: p.seller?.profile?.store_name || p.seller.full_name,
+        avatar_url: shopAvatar?.url || null,
+        location: p.seller?.profile?.address || null,
         rating: 4.8,
         responseRate: '98%',
         followers: 120,
