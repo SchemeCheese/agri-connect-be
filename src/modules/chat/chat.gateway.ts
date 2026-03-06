@@ -11,6 +11,7 @@ import {
 import { Server, Socket } from 'socket.io';
 import { JwtService } from '@nestjs/jwt';
 import { ChatService } from './chat.service';
+import { NegotiationService } from './negotiation.service';
 import { Logger } from '@nestjs/common';
 
 // Cho phép CORS từ FE (chỉnh origin phù hợp khi deploy)
@@ -29,6 +30,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
   constructor(
     private readonly chatService: ChatService,
+    private readonly negotiationService: NegotiationService,
     private readonly jwtService: JwtService,
   ) {}
 
@@ -143,5 +145,131 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     await client.join(conversation.id);
 
     return { event: 'conversationReady', data: { conversationId: conversation.id } };
+  }
+
+  // ─── Event: startNegotiation — Buyer khởi động đàm phán giá ───────────────────────────
+  // FE gọi: socket.emit('startNegotiation', { productId, quantity })
+  @SubscribeMessage('startNegotiation')
+  async handleStartNegotiation(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() data: { productId: string; quantity: number },
+  ) {
+    const userId = client.data?.userId;
+    if (!userId) throw new WsException('Chưa xác thực.');
+
+    const result = await this.negotiationService.startNegotiation(
+      userId,
+      data.productId,
+      data.quantity,
+    );
+
+    // Buyer tự join vào phòng
+    await client.join(result.conversationId);
+
+    // Phát tin nhắn hệ thống tới tất cả thành viên trong phòng (cả seller đang online)
+    this.server.to(result.conversationId).emit('newMessage', {
+      conversationId: result.conversationId,
+      message_type: 'SYSTEM',
+      content: `🌾 Đã bắt đầu cuộc đàm phán giá cho sản phẩm "${result.product.name}".`,
+      created_at: new Date(),
+    });
+
+    // Trả về cho buyer: conversationId + thông tin sản phẩm để hiển thị
+    return { event: 'negotiationStarted', data: result };
+  }
+
+  // ─── Event: sendNegotiationQuote — Seller gửi card báo giá ──────────────────────────────
+  // FE gọi: socket.emit('sendNegotiationQuote', { conversationId, productId, productName, quantity, price, unit })
+  @SubscribeMessage('sendNegotiationQuote')
+  async handleSendNegotiationQuote(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() data: {
+      conversationId: string;
+      productId: string;
+      productName: string;
+      quantity: number;
+      price: number;
+      unit: string;
+    },
+  ) {
+    const userId = client.data?.userId;
+    if (!userId) throw new WsException('Chưa xác thực.');
+
+    const message = await this.negotiationService.sendQuote(userId, data);
+
+    // Phát card báo giá đến tất cả thành viên trong phiëng
+    this.server.to(data.conversationId).emit('newMessage', {
+      id: message.id,
+      conversationId: data.conversationId,
+      sender: message.sender,
+      content: message.message_content,
+      message_type: message.message_type,
+      quote: {
+        messageId: message.id,
+        productId: message.quote_product_id,
+        productName: message.quote_product_name,
+        quantity: Number(message.quote_quantity),
+        price: Number(message.quote_price),
+        unit: message.quote_unit,
+        status: message.quote_status,
+      },
+      created_at: message.created_at,
+    });
+
+    return { event: 'quoteSent', data: { id: message.id } };
+  }
+
+  // ─── Event: respondToQuote — Buyer chấp nhận hoặc từ chối báo giá ────────────────────
+  // FE gọi: socket.emit('respondToQuote', { messageId, action: 'ACCEPTED' | 'REJECTED' })
+  @SubscribeMessage('respondToQuote')
+  async handleRespondToQuote(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() data: { messageId: string; action: 'ACCEPTED' | 'REJECTED'; conversationId: string },
+  ) {
+    const userId = client.data?.userId;
+    if (!userId) throw new WsException('Chưa xác thực.');
+
+    const result = await this.negotiationService.respondToQuote(userId, data.messageId, data.action);
+
+    // Thông báo trạng thái báo giá cập nhật đến cả 2 bên
+    this.server.to(data.conversationId).emit('quoteUpdated', {
+      messageId: data.messageId,
+      status: result.status,
+    });
+
+    // Nếu chấp nhận → gửi thêm sự kiện riêng cho buyer để redirect sang checkout
+    if (result.status === 'ACCEPTED' && result.checkoutData) {
+      client.emit('negotiationAccepted', { checkoutData: result.checkoutData });
+    }
+
+    return { event: 'quoteResponded', data: { status: result.status } };
+  }
+
+  // ─── Event: cancelNegotiation — Hủy cuộc đàm phán (cả 2 bên) ───────────────────────────
+  // FE gọi: socket.emit('cancelNegotiation', { conversationId })
+  @SubscribeMessage('cancelNegotiation')
+  async handleCancelNegotiation(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() data: { conversationId: string },
+  ) {
+    const userId = client.data?.userId;
+    if (!userId) throw new WsException('Chưa xác thực.');
+
+    const message = await this.negotiationService.cancelNegotiation(userId, data.conversationId);
+
+    this.server.to(data.conversationId).emit('newMessage', {
+      id: message.id,
+      conversationId: data.conversationId,
+      sender: message.sender,
+      content: message.message_content,
+      message_type: message.message_type,
+      created_at: message.created_at,
+    });
+
+    this.server.to(data.conversationId).emit('negotiationCancelled', {
+      conversationId: data.conversationId,
+    });
+
+    return { event: 'negotiationCancelled' };
   }
 }

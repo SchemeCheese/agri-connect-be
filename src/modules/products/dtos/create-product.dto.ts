@@ -38,4 +38,10 @@ export class CreateProductDto {
   @IsOptional()
   @IsString()
   certification?: string; // VietGAP, GlobalGAP...
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  min_negotiation_qty?: number; // null = không cho phép thương lượng; > 0 = số kg tối thiểu
 }

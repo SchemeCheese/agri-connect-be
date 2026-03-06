@@ -54,6 +54,18 @@ enum DiscountType {
   FIXED    // Giảm tiền cố định
 }
 
+enum MessageType {
+  TEXT               // Tin nhắn thường
+  NEGOTIATION_QUOTE  // Card báo giá từ seller
+  SYSTEM             // Tin nhắn hệ thống (tự động)
+}
+
+enum QuoteStatus {
+  PENDING   // Chờ buyer phản hồi
+  ACCEPTED  // Buyer chấp nhận → tạo đơn
+  REJECTED  // Buyer từ chối
+}
+
 // --- Enum mới cho OTP (Theo repo mẫu) ---
 enum AccountIdentifier {
   EMAIL
@@ -129,12 +141,13 @@ model Product {
   reference_price Decimal     @db.Decimal(10, 2)
   stock_quantity  Decimal     @db.Decimal(10, 2)
   unit            String
-  location        String?
-  certification   String?
-  is_active       Boolean     @default(true)
-  created_at      DateTime    @default(now())
-  updated_at      DateTime    @updatedAt
-  order_items     OrderItem[]
+  location             String?
+  certification        String?
+  min_negotiation_qty  Decimal?    @db.Decimal(10, 2) // null = không cho thương lượng; > 0 = số lượng tối thiểu
+  is_active            Boolean     @default(true)
+  created_at           DateTime    @default(now())
+  updated_at           DateTime    @updatedAt
+  order_items          OrderItem[]
 }
 
 model Order {
@@ -202,6 +215,16 @@ model ChatMessage {
   sender_id       String
   sender          User         @relation(fields: [sender_id], references: [id])
   message_content String       @db.Text
+  message_type    MessageType  @default(TEXT)
+
+  // ─── Chỉ dùng khi message_type = NEGOTIATION_QUOTE ───────────────────────
+  quote_product_id   String?
+  quote_product_name String?
+  quote_quantity     Decimal?     @db.Decimal(10, 2)
+  quote_price        Decimal?     @db.Decimal(10, 2)
+  quote_unit         String?
+  quote_status       QuoteStatus?
+
   created_at      DateTime     @default(now())
 }
 

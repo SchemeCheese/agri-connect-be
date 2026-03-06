@@ -19,6 +19,7 @@ export class ProductsService {
         certification: dto.certification,
         seller_id: sellerId,
         category_id: dto.category_id,
+        min_negotiation_qty: dto.min_negotiation_qty ?? null,
       },
     });
   }
@@ -106,6 +107,7 @@ export class ProductsService {
       rating: 5,
       reviewCount: 0,
       sold: 0,
+      min_negotiation_qty: p.min_negotiation_qty ? Number(p.min_negotiation_qty) : null,
     }));
   }
   async findOnePublic(id: string) {
@@ -220,7 +222,8 @@ export class ProductsService {
         totalProducts: 10
       },
       reviews: formattedReviews,
-      createdAt: p.created_at
+      createdAt: p.created_at,
+      min_negotiation_qty: p.min_negotiation_qty ? Number(p.min_negotiation_qty) : null,
     };
   }
 
@@ -242,6 +245,9 @@ export class ProductsService {
         location: dto.location,
         certification: dto.certification,
         category_id: dto.category_id,
+        ...(dto.min_negotiation_qty !== undefined && {
+          min_negotiation_qty: dto.min_negotiation_qty === 0 ? null : dto.min_negotiation_qty,
+        }),
       },
     });
   }
