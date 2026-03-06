@@ -154,6 +154,7 @@ model Product {
   created_at           DateTime    @default(now())
   updated_at           DateTime    @updatedAt
   order_items          OrderItem[]
+  conversations        Conversation[]
 }
 
 model Order {
@@ -211,6 +212,13 @@ model Conversation {
   user2_id          String
   user2             User             @relation("User2", fields: [user2_id], references: [id])
   conversation_type ConversationType @default(GENERAL)
+  // Sản phẩm gắn với cuộc trò chuyện (nút "Chat ngay" / "Thương lượng" từ trang SP)
+  product_id        String?
+  product           Product?         @relation(fields: [product_id], references: [id])
+  // Chỉ có giá trị khi conversation_type = NEGOTIATION
+  // Giá và số lượng buyer đề xuất ban đầu — seller thấy ngay khi mở chat
+  proposed_quantity Decimal?         @db.Decimal(10, 2)
+  proposed_price    Decimal?         @db.Decimal(10, 2)
   messages          ChatMessage[]
   created_at        DateTime         @default(now())
 }

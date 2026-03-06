@@ -8,13 +8,17 @@ export class ChatService {
 
   // ─── Tìm hoặc tạo mới Conversation giữa 2 user ─────────────────────────
   // type mặc định là GENERAL; NegotiationService truyền NEGOTIATION
+  // productId: gắn sản phẩm đang hỏi/đàm phán vào cuộc trò chuyện (optional)
   async findOrCreateConversation(
     userAId: string,
     userBId: string,
     type: ConversationType = ConversationType.GENERAL,
+    productId?: string,
   ) {
     const [user1Id, user2Id] = [userAId, userBId].sort();
 
+    // Với GENERAL: mỗi (buyer, seller, product) chỉ có 1 conversation
+    // Với NEGOTIATION: mỗi (buyer, seller, product) cũng chỉ có 1
     const existing = await this.db.conversation.findFirst({
       where: {
         OR: [
@@ -22,19 +26,25 @@ export class ChatService {
           { user1_id: user2Id, user2_id: user1Id },
         ],
         conversation_type: type,
+        product_id: productId ?? null,
       },
     });
 
     if (existing) return existing;
 
     return this.db.conversation.create({
-      data: { user1_id: user1Id, user2_id: user2Id, conversation_type: type },
+      data: {
+        user1_id: user1Id,
+        user2_id: user2Id,
+        conversation_type: type,
+        product_id: productId ?? null,
+      },
     });
   }
 
   // ─── HTTP: Khởi tạo chat thường (dùng cho nút "Chat ngay" ở trang sản phẩm) ─
-  // Trả về conversationId để FE điều hướng vào trang chat ngay mà chưa cần socket
-  async initiateChat(requesterId: string, partnerId: string) {
+  // productId (optional): nếu bấm từ trang sản phẩm thì truyền vào để gắn context SP
+  async initiateChat(requesterId: string, partnerId: string, productId?: string) {
     if (requesterId === partnerId) {
       throw new BadRequestException('Không thể tự chat với chính mình.');
     }
@@ -44,12 +54,42 @@ export class ChatService {
     });
     if (!partner) throw new NotFoundException('Người dùng không tồn tại.');
 
+    // Lấy thông tin sản phẩm nếu có (FE dùng hiển thị popover context)
+    let productContext: {
+      id: string;
+      name: string;
+      reference_price: number;
+      unit: string;
+      image: string | null;
+    } | null = null;
+
+    if (productId) {
+      const product = await this.db.product.findUnique({
+        where: { id: productId },
+        select: { id: true, name: true, reference_price: true, unit: true },
+      });
+      if (product) {
+        const img = await this.db.attachment.findFirst({
+          where: { target_id: product.id, target_type: 'PRODUCT' },
+          select: { url: true },
+        });
+        productContext = {
+          id: product.id,
+          name: product.name,
+          reference_price: Number(product.reference_price),
+          unit: product.unit,
+          image: img?.url ?? null,
+        };
+      }
+    }
+
     const conv = await this.findOrCreateConversation(
       requesterId,
       partnerId,
       ConversationType.GENERAL,
+      productId,
     );
-    return { conversationId: conv.id, partner };
+    return { conversationId: conv.id, partner, product: productContext };
   }
 
   // ─── Lưu tin nhắn vào DB ─────────────────────────────────────────────────
@@ -111,6 +151,10 @@ export class ChatService {
       include: {
         user1: { select: { id: true, full_name: true } },
         user2: { select: { id: true, full_name: true } },
+        // Gắn thông tin sản phẩm (nếu có) — dùng hiển thị header "Đang hỏi về: ..."
+        product: {
+          select: { id: true, name: true, reference_price: true, unit: true, min_negotiation_qty: true },
+        },
         messages: {
           orderBy: { created_at: 'desc' },
           take: 1, // Tin nhắn mới nhất để preview
@@ -138,7 +182,30 @@ export class ChatService {
             full_name: partner.full_name,
             avatar: avatarAttachment?.url ?? null,
           },
-          lastMessage: conv.messages[0] ?? null,
+        // null nếu chỉ chat thường từ trang shop (không kèm sản phẩm)
+          product: conv.product
+            ? {
+                id: conv.product.id,
+                name: conv.product.name,
+                reference_price: Number(conv.product.reference_price),
+                unit: conv.product.unit,
+                min_negotiation_qty: conv.product.min_negotiation_qty
+                  ? Number(conv.product.min_negotiation_qty)
+                  : null,
+              }
+            : null,
+          // Chỉ có giá trị khi conversation_type = NEGOTIATION
+          proposedQuantity: (conv as any).proposed_quantity ? Number((conv as any).proposed_quantity) : null,
+          proposedPrice: (conv as any).proposed_price ? Number((conv as any).proposed_price) : null,
+          // lastMessage.message_content là field FE phải dùng (KHÔNG phải 'content')
+          lastMessage: conv.messages[0]
+            ? {
+                id: conv.messages[0].id,
+                content: (conv.messages[0] as any).message_content,
+                message_type: (conv.messages[0] as any).message_type,
+                created_at: conv.messages[0].created_at,
+              }
+            : null,
           created_at: conv.created_at,
         };
       }),

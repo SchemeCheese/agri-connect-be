@@ -1,5 +1,5 @@
 import { Controller, Get, Post, Param, Body, UseGuards, Request, Query } from '@nestjs/common';
-import { IsString, IsNotEmpty } from 'class-validator';
+import { IsString, IsNotEmpty, IsOptional } from 'class-validator';
 import { ConversationType } from '@prisma/client';
 import { ChatService } from './chat.service';
 import { JwtAuthGuard } from '../auth/decorators/guards/jwt-auth.guard';
@@ -8,6 +8,12 @@ class InitiateChatDto {
   @IsString()
   @IsNotEmpty()
   partnerId: string;
+
+  // Nếu bấm "Chat ngay" từ trang sản phẩm — truyền vào để BE gắn context SP
+  // Nếu bấm từ trang shop (chat chung) — không truyền
+  @IsString()
+  @IsOptional()
+  productId?: string;
 }
 
 @Controller('chat')
@@ -23,7 +29,7 @@ export class ChatController {
    */
   @Post('initiate')
   async initiateChat(@Request() req, @Body() dto: InitiateChatDto) {
-    return this.chatService.initiateChat(req.user.sub, dto.partnerId);
+    return this.chatService.initiateChat(req.user.sub, dto.partnerId, dto.productId);
   }
 
   /**

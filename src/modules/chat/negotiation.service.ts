@@ -10,6 +10,9 @@ import { ChatService } from './chat.service';
 
 export interface StartNegotiationResult {
   conversationId: string;
+  // Giá và số lượng do buyer đề xuất (FE hiển thị lại trong chat header / card)
+  proposedQuantity: number;
+  proposedPrice: number;
   product: {
     id: string;
     name: string;
@@ -36,11 +39,12 @@ export class NegotiationService {
   ) {}
 
   // ─── Buyer khởi động đàm phán ─────────────────────────────────────────────
-  // Validate ngưỡng kg, tìm/tạo conversation, gửi tin nhắn SYSTEM
+  // Validate ngưỡng kg, tìm/tạo conversation, lưu giá đề xuất, gửi tin nhắn SYSTEM
   async startNegotiation(
     buyerId: string,
     productId: string,
     quantity: number,
+    proposedPrice: number,
   ): Promise<StartNegotiationResult> {
     const product = await this.db.product.findUnique({
       where: { id: productId },
@@ -63,11 +67,20 @@ export class NegotiationService {
     }
 
     // Tìm hoặc tạo conversation kiểu NEGOTIATION riêng (tách khỏi chat thường)
+    // Gắn productId để FE hiển thị header "Đang thương lượng: [tên SP]"
     const conversation = await this.chatService.findOrCreateConversation(
       buyerId,
       product.seller_id,
       ConversationType.NEGOTIATION,
+      productId,
     );
+
+    // Cập nhật giá đề xuất mới nhất của buyer vào conversation
+    // (buyer có thể gử lại nhiều lần với giá khác nhau trước khi seller phản hồi)
+    await this.db.conversation.update({
+      where: { id: conversation.id },
+      data: { proposed_quantity: quantity, proposed_price: proposedPrice },
+    });
 
     // Lấy tên buyer để ghi vào tin nhắn hệ thống
     const buyer = await this.db.user.findUnique({
@@ -77,7 +90,8 @@ export class NegotiationService {
 
     const systemMsg =
       `🌾 ${buyer?.full_name ?? 'Người mua'} muốn thương lượng giá sản phẩm ` +
-      `"${product.name}" với số lượng ${quantity} ${product.unit}.`;
+      `"${product.name}" — ${quantity} ${product.unit} ` +
+      `với giá đề xuất ${proposedPrice.toLocaleString('vi-VN')}đ/${product.unit}.`;
 
     await this.db.chatMessage.create({
       data: {
@@ -90,6 +104,8 @@ export class NegotiationService {
 
     return {
       conversationId: conversation.id,
+      proposedQuantity: quantity,
+      proposedPrice,
       product: {
         id: product.id,
         name: product.name,

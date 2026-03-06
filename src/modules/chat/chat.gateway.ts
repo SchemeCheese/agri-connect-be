@@ -149,19 +149,24 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
   }
 
   // ─── Event: startNegotiation — Buyer khởi động đàm phán giá ───────────────────────────
-  // FE gọi: socket.emit('startNegotiation', { productId, quantity })
+  // FE gọi: socket.emit('startNegotiation', { productId, quantity, proposedPrice })
   @SubscribeMessage('startNegotiation')
   async handleStartNegotiation(
     @ConnectedSocket() client: Socket,
-    @MessageBody() data: { productId: string; quantity: number },
+    @MessageBody() data: { productId: string; quantity: number; proposedPrice: number },
   ) {
     const userId = client.data?.userId;
     if (!userId) throw new WsException('Chưa xác thực.');
+
+    if (!data.proposedPrice || data.proposedPrice <= 0) {
+      throw new WsException('Giá đề xuất phải lớn hơn 0.');
+    }
 
     const result = await this.negotiationService.startNegotiation(
       userId,
       data.productId,
       data.quantity,
+      data.proposedPrice,
     );
 
     // Buyer tự join vào phòng
@@ -175,7 +180,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       created_at: new Date(),
     });
 
-    // Trả về cho buyer: conversationId + thông tin sản phẩm để hiển thị
+    // Trả về cho buyer: conversationId + thông tin sản phẩm + giá đề xuất
     return { event: 'negotiationStarted', data: result };
   }
 
