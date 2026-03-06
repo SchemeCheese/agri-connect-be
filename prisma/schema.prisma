@@ -54,12 +54,6 @@ enum DiscountType {
   FIXED    // Giảm tiền cố định
 }
 
-enum ConversationType {
-  GENERAL      // Chat hỏi đáp thông thường giữa buyer – seller
-  NEGOTIATION  // Cuộc trò chuyện gắn với luồng thương lượng giá
-  AI           // Chat với AI (phát triển sau)
-}
-
 enum MessageType {
   TEXT               // Tin nhắn thường
   NEGOTIATION_QUOTE  // Card báo giá từ seller
@@ -154,7 +148,7 @@ model Product {
   created_at           DateTime    @default(now())
   updated_at           DateTime    @updatedAt
   order_items          OrderItem[]
-  conversations        Conversation[]
+  context_messages     ChatMessage[]
 }
 
 model Order {
@@ -206,21 +200,16 @@ model Payment {
 }
 
 model Conversation {
-  id                String           @id @default(cuid())
-  user1_id          String
-  user1             User             @relation("User1", fields: [user1_id], references: [id])
-  user2_id          String
-  user2             User             @relation("User2", fields: [user2_id], references: [id])
-  conversation_type ConversationType @default(GENERAL)
-  // Sản phẩm gắn với cuộc trò chuyện (nút "Chat ngay" / "Thương lượng" từ trang SP)
-  product_id        String?
-  product           Product?         @relation(fields: [product_id], references: [id])
-  // Chỉ có giá trị khi conversation_type = NEGOTIATION
-  // Giá và số lượng buyer đề xuất ban đầu — seller thấy ngay khi mở chat
-  proposed_quantity Decimal?         @db.Decimal(10, 2)
-  proposed_price    Decimal?         @db.Decimal(10, 2)
-  messages          ChatMessage[]
-  created_at        DateTime         @default(now())
+  id         String        @id @default(cuid())
+  user1_id   String
+  user1      User          @relation("User1", fields: [user1_id], references: [id])
+  user2_id   String
+  user2      User          @relation("User2", fields: [user2_id], references: [id])
+  messages   ChatMessage[]
+  created_at DateTime      @default(now())
+
+  // Đảm bảo mỗi cặp buyer-seller chỉ có đúng 1 conversation
+  @@unique([user1_id, user2_id])
 }
 
 model ChatMessage {
@@ -232,11 +221,19 @@ model ChatMessage {
   message_content String       @db.Text
   message_type    MessageType  @default(TEXT)
 
-  // ─── Chỉ dùng khi message_type = NEGOTIATION_QUOTE ───────────────────────
+  // Sản phẩm được đính kèm vào tin nhắn (SYSTEM: "Chat ngay", NEGOTIATION_QUOTE: card báo giá)
+  // FE dùng để hiển thị badge sản phẩm người dùng đang hỏi/thương lượng
+  context_product_id String?
+  context_product    Product?  @relation(fields: [context_product_id], references: [id])
+
+  // ─── Chỉ dùng khi message_type = NEGOTIATION_QUOTE ──────────────────────
   quote_product_id   String?
   quote_product_name String?
   quote_quantity     Decimal?     @db.Decimal(10, 2)
   quote_price        Decimal?     @db.Decimal(10, 2)
+  // Chỉ dùng khi NEGOTIATION_QUOTE: số lượng và giá buyer đề xuất đầu cuộc đàm phán
+  proposed_quantity  Decimal?     @db.Decimal(10, 2)
+  proposed_price     Decimal?     @db.Decimal(10, 2)
   quote_unit         String?
   quote_status       QuoteStatus?
 

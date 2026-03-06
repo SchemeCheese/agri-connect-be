@@ -1,10 +1,10 @@
-import {
+﻿import {
   Injectable,
   BadRequestException,
   ForbiddenException,
   NotFoundException,
 } from '@nestjs/common';
-import { MessageType, QuoteStatus, ConversationType } from '@prisma/client';
+import { MessageType, QuoteStatus } from '@prisma/client';
 import { DatabaseService } from '../../database/database.service';
 import { ChatService } from './chat.service';
 
@@ -19,6 +19,17 @@ export interface StartNegotiationResult {
     unit: string;
     reference_price: number;
     min_negotiation_qty: number;
+    image: string | null;
+  };
+  // Tin nhắn SYSTEM đã được lưu — gateway dùng để emit newMessage đúng shape
+  systemMessage: {
+    id: string;
+    message_content: string;
+    message_type: string;
+    context_product_id: string;
+    proposed_quantity: number;
+    proposed_price: number;
+    created_at: Date;
   };
 }
 
@@ -66,21 +77,11 @@ export class NegotiationService {
       );
     }
 
-    // Tìm hoặc tạo conversation kiểu NEGOTIATION riêng (tách khỏi chat thường)
-    // Gắn productId để FE hiển thị header "Đang thương lượng: [tên SP]"
+    // 1 cặp buyer-seller = 1 conversation duy nhất (chứa cả chat thường lẫn đàm phán)
     const conversation = await this.chatService.findOrCreateConversation(
       buyerId,
       product.seller_id,
-      ConversationType.NEGOTIATION,
-      productId,
     );
-
-    // Cập nhật giá đề xuất mới nhất của buyer vào conversation
-    // (buyer có thể gử lại nhiều lần với giá khác nhau trước khi seller phản hồi)
-    await this.db.conversation.update({
-      where: { id: conversation.id },
-      data: { proposed_quantity: quantity, proposed_price: proposedPrice },
-    });
 
     // Lấy tên buyer để ghi vào tin nhắn hệ thống
     const buyer = await this.db.user.findUnique({
@@ -93,13 +94,25 @@ export class NegotiationService {
       `"${product.name}" — ${quantity} ${product.unit} ` +
       `với giá đề xuất ${proposedPrice.toLocaleString('vi-VN')}đ/${product.unit}.`;
 
-    await this.db.chatMessage.create({
+    // Lưu context sản phẩm + đề xuất ngay vào SYSTEM message
+    // Seller xem card này đầu cuộc trò chuyện là hiểu ngay
+    const savedMsg = await this.db.chatMessage.create({
       data: {
         conversation_id: conversation.id,
         sender_id: buyerId,
         message_content: systemMsg,
         message_type: MessageType.SYSTEM,
+        context_product_id: productId,
+        proposed_quantity: quantity,
+        proposed_price: proposedPrice,
       },
+      select: { id: true, message_content: true, message_type: true, context_product_id: true, proposed_quantity: true, proposed_price: true, created_at: true },
+    });
+
+    // Lấy ảnh đầu tiên của sản phẩm để FE badge
+    const img = await this.db.attachment.findFirst({
+      where: { target_id: productId, target_type: 'PRODUCT' },
+      select: { url: true },
     });
 
     return {
@@ -112,6 +125,16 @@ export class NegotiationService {
         unit: product.unit,
         reference_price: Number(product.reference_price),
         min_negotiation_qty: Number(product.min_negotiation_qty),
+        image: img?.url ?? null,
+      },
+      systemMessage: {
+        id: savedMsg.id,
+        message_content: savedMsg.message_content,
+        message_type: savedMsg.message_type,
+        context_product_id: savedMsg.context_product_id!,
+        proposed_quantity: Number(savedMsg.proposed_quantity),
+        proposed_price: Number(savedMsg.proposed_price),
+        created_at: savedMsg.created_at,
       },
     };
   }

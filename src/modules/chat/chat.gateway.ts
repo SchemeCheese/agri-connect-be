@@ -110,11 +110,17 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     );
 
     // Phát tin nhắn đến tất cả client trong phòng (bao gồm người gửi)
+    // Shape phải khớp với getMessages response — FE dùng chung model
     this.server.to(data.conversationId).emit('newMessage', {
       id: message.id,
       conversationId: data.conversationId,
       sender: message.sender,
-      content: message.message_content,
+      message_content: message.message_content,
+      message_type: message.message_type,
+      context_product: null,
+      proposed_quantity: null,
+      proposed_price: null,
+      quote: null,
       created_at: message.created_at,
     });
 
@@ -122,8 +128,8 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
   }
 
   // ─── Event: startConversation — join room sau khi FE đã có conversationId ─
-  // Thông thường FE gọi HTTP POST /chat/initiate trước để lấy conversationId,
-  // sau đó emit 'startConversation' để join room Socket.IO.
+  // FE gọi POST /chat/initiate trước (HTTP) để lấy conversationId,
+  // sau đó mới emit 'startConversation' để join Socket.IO room.
   // FE gọi: socket.emit('startConversation', { partnerId })
   @SubscribeMessage('startConversation')
   async handleStartConversation(
@@ -140,7 +146,6 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     const conversation = await this.chatService.findOrCreateConversation(
       userId,
       data.partnerId,
-      // ConversationType.GENERAL — import thêm nếu cần
     );
 
     await client.join(conversation.id);
@@ -172,12 +177,25 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     // Buyer tự join vào phòng
     await client.join(result.conversationId);
 
-    // Phát tin nhắn hệ thống tới tất cả thành viên trong phòng (cả seller đang online)
+    // Phát SYSTEM message đã lưu — đúng shape như getMessages, seller thấy ngay
     this.server.to(result.conversationId).emit('newMessage', {
+      id: result.systemMessage.id,
       conversationId: result.conversationId,
-      message_type: 'SYSTEM',
-      content: `🌾 Đã bắt đầu cuộc đàm phán giá cho sản phẩm "${result.product.name}".`,
-      created_at: new Date(),
+      sender: { id: userId, full_name: null },
+      message_content: result.systemMessage.message_content,
+      message_type: result.systemMessage.message_type,
+      context_product: {
+        id: result.product.id,
+        name: result.product.name,
+        reference_price: result.product.reference_price,
+        unit: result.product.unit,
+        min_negotiation_qty: result.product.min_negotiation_qty,
+        image: result.product.image,
+      },
+      proposed_quantity: result.systemMessage.proposed_quantity,
+      proposed_price: result.systemMessage.proposed_price,
+      quote: null,
+      created_at: result.systemMessage.created_at,
     });
 
     // Trả về cho buyer: conversationId + thông tin sản phẩm + giá đề xuất
@@ -203,19 +221,21 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
     const message = await this.negotiationService.sendQuote(userId, data);
 
-    // Phát card báo giá đến tất cả thành viên trong phiëng
+    // Phát card báo giá đến tất cả thành viên trong phòng
     this.server.to(data.conversationId).emit('newMessage', {
       id: message.id,
       conversationId: data.conversationId,
       sender: message.sender,
-      content: message.message_content,
+      message_content: message.message_content,
       message_type: message.message_type,
+      context_product: null,
+      proposed_quantity: null,
+      proposed_price: null,
       quote: {
-        messageId: message.id,
         productId: message.quote_product_id,
         productName: message.quote_product_name,
-        quantity: Number(message.quote_quantity),
-        price: Number(message.quote_price),
+        quantity: message.quote_quantity ? Number(message.quote_quantity) : null,
+        price: message.quote_price ? Number(message.quote_price) : null,
         unit: message.quote_unit,
         status: message.quote_status,
       },
@@ -267,8 +287,12 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       id: message.id,
       conversationId: data.conversationId,
       sender: message.sender,
-      content: message.message_content,
+      message_content: message.message_content,
       message_type: message.message_type,
+      context_product: null,
+      proposed_quantity: null,
+      proposed_price: null,
+      quote: null,
       created_at: message.created_at,
     });
 
