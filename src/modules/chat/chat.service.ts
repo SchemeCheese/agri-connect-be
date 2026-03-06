@@ -1,4 +1,5 @@
-import { Injectable, ForbiddenException, NotFoundException } from '@nestjs/common';
+import { Injectable, ForbiddenException, NotFoundException, BadRequestException } from '@nestjs/common';
+import { ConversationType } from '@prisma/client';
 import { DatabaseService } from '../../database/database.service';
 
 @Injectable()
@@ -6,8 +7,12 @@ export class ChatService {
   constructor(private readonly db: DatabaseService) {}
 
   // ─── Tìm hoặc tạo mới Conversation giữa 2 user ─────────────────────────
-  async findOrCreateConversation(userAId: string, userBId: string) {
-    // Đảm bảo thứ tự user1/user2 luôn nhất quán để tránh trùng lặp
+  // type mặc định là GENERAL; NegotiationService truyền NEGOTIATION
+  async findOrCreateConversation(
+    userAId: string,
+    userBId: string,
+    type: ConversationType = ConversationType.GENERAL,
+  ) {
     const [user1Id, user2Id] = [userAId, userBId].sort();
 
     const existing = await this.db.conversation.findFirst({
@@ -16,14 +21,35 @@ export class ChatService {
           { user1_id: user1Id, user2_id: user2Id },
           { user1_id: user2Id, user2_id: user1Id },
         ],
+        conversation_type: type,
       },
     });
 
     if (existing) return existing;
 
     return this.db.conversation.create({
-      data: { user1_id: user1Id, user2_id: user2Id },
+      data: { user1_id: user1Id, user2_id: user2Id, conversation_type: type },
     });
+  }
+
+  // ─── HTTP: Khởi tạo chat thường (dùng cho nút "Chat ngay" ở trang sản phẩm) ─
+  // Trả về conversationId để FE điều hướng vào trang chat ngay mà chưa cần socket
+  async initiateChat(requesterId: string, partnerId: string) {
+    if (requesterId === partnerId) {
+      throw new BadRequestException('Không thể tự chat với chính mình.');
+    }
+    const partner = await this.db.user.findUnique({
+      where: { id: partnerId },
+      select: { id: true, full_name: true },
+    });
+    if (!partner) throw new NotFoundException('Người dùng không tồn tại.');
+
+    const conv = await this.findOrCreateConversation(
+      requesterId,
+      partnerId,
+      ConversationType.GENERAL,
+    );
+    return { conversationId: conv.id, partner };
   }
 
   // ─── Lưu tin nhắn vào DB ─────────────────────────────────────────────────
@@ -74,11 +100,13 @@ export class ChatService {
     });
   }
 
-  // ─── Lấy danh sách tất cả conversation của user ──────────────────────────
-  async getConversations(userId: string) {
+  // ─── Lấy danh sách conversation của user (có thể lọc theo type) ───────────
+  // type = undefined → trả về GENERAL + NEGOTIATION (bỏ qua AI)
+  async getConversations(userId: string, type?: ConversationType) {
     const conversations = await this.db.conversation.findMany({
       where: {
         OR: [{ user1_id: userId }, { user2_id: userId }],
+        conversation_type: type ?? { in: [ConversationType.GENERAL, ConversationType.NEGOTIATION] },
       },
       include: {
         user1: { select: { id: true, full_name: true } },
@@ -104,6 +132,7 @@ export class ChatService {
 
         return {
           id: conv.id,
+          conversation_type: conv.conversation_type,
           partner: {
             id: partner.id,
             full_name: partner.full_name,

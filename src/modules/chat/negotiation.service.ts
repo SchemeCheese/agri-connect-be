@@ -4,7 +4,7 @@ import {
   ForbiddenException,
   NotFoundException,
 } from '@nestjs/common';
-import { MessageType, QuoteStatus } from '@prisma/client';
+import { MessageType, QuoteStatus, ConversationType } from '@prisma/client';
 import { DatabaseService } from '../../database/database.service';
 import { ChatService } from './chat.service';
 
@@ -62,10 +62,11 @@ export class NegotiationService {
       );
     }
 
-    // Tìm hoặc tạo conversation giữa buyer và seller
+    // Tìm hoặc tạo conversation kiểu NEGOTIATION riêng (tách khỏi chat thường)
     const conversation = await this.chatService.findOrCreateConversation(
       buyerId,
       product.seller_id,
+      ConversationType.NEGOTIATION,
     );
 
     // Lấy tên buyer để ghi vào tin nhắn hệ thống

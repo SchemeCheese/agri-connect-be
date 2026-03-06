@@ -54,6 +54,12 @@ enum DiscountType {
   FIXED    // Giảm tiền cố định
 }
 
+enum ConversationType {
+  GENERAL      // Chat hỏi đáp thông thường giữa buyer – seller
+  NEGOTIATION  // Cuộc trò chuyện gắn với luồng thương lượng giá
+  AI           // Chat với AI (phát triển sau)
+}
+
 enum MessageType {
   TEXT               // Tin nhắn thường
   NEGOTIATION_QUOTE  // Card báo giá từ seller
@@ -199,13 +205,14 @@ model Payment {
 }
 
 model Conversation {
-  id         String        @id @default(cuid())
-  user1_id   String
-  user1      User          @relation("User1", fields: [user1_id], references: [id])
-  user2_id   String
-  user2      User          @relation("User2", fields: [user2_id], references: [id])
-  messages   ChatMessage[]
-  created_at DateTime      @default(now())
+  id                String           @id @default(cuid())
+  user1_id          String
+  user1             User             @relation("User1", fields: [user1_id], references: [id])
+  user2_id          String
+  user2             User             @relation("User2", fields: [user2_id], references: [id])
+  conversation_type ConversationType @default(GENERAL)
+  messages          ChatMessage[]
+  created_at        DateTime         @default(now())
 }
 
 model ChatMessage {

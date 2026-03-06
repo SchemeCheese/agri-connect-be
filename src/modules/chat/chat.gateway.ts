@@ -121,9 +121,10 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     return { event: 'messageSent', data: { id: message.id } };
   }
 
-  // ─── Event: startConversation — tạo/lấy conversation với người bán ───────
+  // ─── Event: startConversation — join room sau khi FE đã có conversationId ─
+  // Thông thường FE gọi HTTP POST /chat/initiate trước để lấy conversationId,
+  // sau đó emit 'startConversation' để join room Socket.IO.
   // FE gọi: socket.emit('startConversation', { partnerId })
-  // Dùng khi buyer muốn chat với seller ngay từ trang sản phẩm
   @SubscribeMessage('startConversation')
   async handleStartConversation(
     @ConnectedSocket() client: Socket,
@@ -139,9 +140,9 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     const conversation = await this.chatService.findOrCreateConversation(
       userId,
       data.partnerId,
+      // ConversationType.GENERAL — import thêm nếu cần
     );
 
-    // Tự động join room ngay sau khi tạo
     await client.join(conversation.id);
 
     return { event: 'conversationReady', data: { conversationId: conversation.id } };
