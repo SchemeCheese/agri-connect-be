@@ -208,6 +208,8 @@ export class ProductsService {
       rating: Number(averageRating.toFixed(1)),
       reviewCount: reviewCount,
       sold: soldQuantity,
+      unit: p.unit,
+      seller_id: p.seller_id,
       stock: Number(p.stock_quantity),
       brand: p.seller?.profile?.store_name || 'Nông sản Việt',
       shop: {

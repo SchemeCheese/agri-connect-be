@@ -18,11 +18,11 @@ const CATEGORIES = [
 // DATA: SHOPS
 // ==========================================
 const SHOPS = [
-  { id: 'shop-1', name: 'Nông Trại Cầu Đất', email: 'shop1@gmail.com', avatar: 'https://images.unsplash.com/photo-1605000797499-95a51c5269ae?w=200&h=200&fit=crop', location: 'TP. Đà Lạt, Lâm Đồng', desc: 'Chuyên Dâu tây & Rau củ' },
-  { id: 'shop-2', name: 'Vựa Gạo Miền Tây', email: 'shop2@gmail.com', avatar: 'https://images.unsplash.com/photo-1586201375761-83865001e31c?w=200&h=200&fit=crop', location: 'TP. Cần Thơ', desc: 'Gạo ngon ST25' },
-  { id: 'shop-3', name: 'Hạt Dinh Dưỡng Organic', email: 'shop3@gmail.com', avatar: 'https://images.unsplash.com/photo-1596040033229-a9821ebd058d?w=200&h=200&fit=crop', location: 'Bình Phước', desc: 'Hạt điều & Granola' },
-  { id: 'shop-4', name: 'Thảo Mộc Tây Bắc', email: 'shop4@gmail.com', avatar: 'https://images.unsplash.com/photo-1615485925694-a039744c4b69?w=200&h=200&fit=crop', location: 'Sapa, Lào Cai', desc: 'Gia vị & Dược liệu' },
-  { id: 'shop-5', name: 'Nông Sản Miền Núi', email: 'shop5@gmail.com', avatar: 'https://images.unsplash.com/photo-1501004318641-b39e6451bec6?w=200&h=200&fit=crop', location: 'Kon Tum', desc: 'Nông sản sạch miền núi' }
+  { id: 'shop-1', userId: 'seller-shop-1', name: 'Nông Trại Cầu Đất', email: 'shop1@gmail.com', avatar: 'https://images.unsplash.com/photo-1605000797499-95a51c5269ae?w=200&h=200&fit=crop', location: 'TP. Đà Lạt, Lâm Đồng', desc: 'Chuyên Dâu tây & Rau củ' },
+  { id: 'shop-2', userId: 'seller-shop-2', name: 'Vựa Gạo Miền Tây', email: 'shop2@gmail.com', avatar: 'https://images.unsplash.com/photo-1586201375761-83865001e31c?w=200&h=200&fit=crop', location: 'TP. Cần Thơ', desc: 'Gạo ngon ST25' },
+  { id: 'shop-3', userId: 'seller-shop-3', name: 'Hạt Dinh Dưỡng Organic', email: 'shop3@gmail.com', avatar: 'https://images.unsplash.com/photo-1596040033229-a9821ebd058d?w=200&h=200&fit=crop', location: 'Bình Phước', desc: 'Hạt điều & Granola' },
+  { id: 'shop-4', userId: 'seller-shop-4', name: 'Thảo Mộc Tây Bắc', email: 'shop4@gmail.com', avatar: 'https://images.unsplash.com/photo-1615485925694-a039744c4b69?w=200&h=200&fit=crop', location: 'Sapa, Lào Cai', desc: 'Gia vị & Dược liệu' },
+  { id: 'shop-5', userId: 'seller-shop-5', name: 'Nông Sản Miền Núi', email: 'shop5@gmail.com', avatar: 'https://images.unsplash.com/photo-1501004318641-b39e6451bec6?w=200&h=200&fit=crop', location: 'Kon Tum', desc: 'Nông sản sạch miền núi' }
 ];
 
 // ==========================================
@@ -147,6 +147,11 @@ async function main() {
   await prisma.orderItem.deleteMany();
   await prisma.payment.deleteMany();
   await prisma.order.deleteMany();
+  await prisma.chatMessage.deleteMany();
+  await prisma.conversation.deleteMany();
+  await prisma.savedVoucher.deleteMany();
+  await prisma.voucher.deleteMany();
+  await prisma.verification.deleteMany();
   await prisma.product.deleteMany();
   await prisma.category.deleteMany();
   await prisma.profile.deleteMany();
@@ -158,6 +163,7 @@ async function main() {
   console.log('--- Tạo Khách hàng ---');
   const buyer = await prisma.user.create({
     data: {
+      id: 'buyer-default',
       email: 'khach@gmail.com',
       password_hash: passwordHash,
       full_name: 'Khách Hàng',
@@ -171,6 +177,7 @@ async function main() {
   for (const shop of SHOPS) {
     const seller = await prisma.user.create({
       data: {
+        id: shop.userId,
         email: shop.email,
         password_hash: passwordHash,
         full_name: shop.name,

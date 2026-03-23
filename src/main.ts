@@ -6,6 +6,11 @@ import { join } from 'path';
 
 async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule);
+  const port = Number(process.env.PORT) || 3001;
+
+  const corsOrigins = process.env.CORS_ORIGIN
+    ? process.env.CORS_ORIGIN.split(',').map((origin) => origin.trim()).filter(Boolean)
+    : undefined;
 
   // Phục vụ file tĩnh từ thư mục /public (ví dụ: /placeholder.png)
   app.useStaticAssets(join(__dirname, '..', 'public'));
@@ -18,12 +23,12 @@ async function bootstrap() {
 
   // 2. Cho phép Frontend gọi API (CORS)
   app.enableCors({
-    origin: '*', // Tạm thời cho phép tất cả (Sau này sẽ đổi thành domain của FE)
+    origin: corsOrigins && corsOrigins.length > 0 ? corsOrigins : true,
     methods: 'GET,HEAD,PUT,PATCH,POST,DELETE',
     credentials: true,
   });
 
-  await app.listen(3001);
+  await app.listen(port);
   console.log(`Application is running on: ${await app.getUrl()}`);
 }
 bootstrap();
