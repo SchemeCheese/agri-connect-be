@@ -168,6 +168,7 @@ async function main() {
       password_hash: passwordHash,
       full_name: 'Khách Hàng',
       role: UserRole.BUYER,
+      verified_email: true,
     }
   });
 
@@ -182,6 +183,7 @@ async function main() {
         password_hash: passwordHash,
         full_name: shop.name,
         role: UserRole.SELLER,
+        verified_email: true,
         profile: {
           create: {
             store_name: shop.name,

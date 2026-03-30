@@ -26,13 +26,13 @@ export class AuthService {
     });
     
     if (existingUser) {
-      if (existingUser.is_active) {
+      // Chỉ chặn khi tài khoản đã xác thực email; cho phép ghi đè nếu còn chưa verified
+      if (existingUser.verified_email) {
         throw new BadRequestException('Email này đã được đăng ký và xác thực!');
-      } else {
-        // Nếu user tồn tại nhưng CHƯA xác thực, có thể xóa đi tạo lại hoặc cho phép ghi đè.
-        // Ở đây để đơn giản, ta xóa user rác cũ đi.
-        await this.databaseService.user.delete({ where: { email: dto.email }});
       }
+
+      // Nếu chưa xác thực, xóa bản ghi cũ để tạo lại và gửi OTP mới
+      await this.databaseService.user.delete({ where: { email: dto.email } });
     }
 
     // 2. Mã hóa mật khẩu

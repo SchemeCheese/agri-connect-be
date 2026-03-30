@@ -124,7 +124,8 @@ export class ProductsService {
       },
     });
 
-    if (!p || !p.is_active) {
+    // Cho phép xem cả khi sản phẩm đã ngừng bán để hiển thị trạng thái hết hàng
+    if (!p) {
       throw new NotFoundException('Sản phẩm không tồn tại hoặc đã ngừng bán');
     }
 
@@ -211,6 +212,7 @@ export class ProductsService {
       unit: p.unit,
       seller_id: p.seller_id,
       stock: Number(p.stock_quantity),
+      is_active: p.is_active,
       brand: p.seller?.profile?.store_name || 'Nông sản Việt',
       shop: {
         id: p.seller.id,
