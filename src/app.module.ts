@@ -11,6 +11,7 @@ import { ProfileModule } from './modules/profile/profile.module';
 import { SearchModule } from './modules/search/search.module';
 import { VouchersModule } from './modules/vouchers/vouchers.module';
 import { ShopsModule } from './modules/shops/shops.module';
+import { PaymentsModule } from './modules/payments/payments.module';
 
 @Module({
   imports: [
@@ -24,6 +25,7 @@ import { ShopsModule } from './modules/shops/shops.module';
     SearchModule,
     VouchersModule,
     ShopsModule,
+    PaymentsModule,
   ],
   controllers: [AppController],
   providers: [AppService],
