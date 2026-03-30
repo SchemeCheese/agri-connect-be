@@ -1,39 +1,216 @@
-import { Injectable, NotFoundException, ForbiddenException } from '@nestjs/common';
+import {
+  Injectable,
+  NotFoundException,
+  ForbiddenException,
+  BadRequestException,
+} from '@nestjs/common';
 import { DatabaseService } from '../../database/database.service';
 import { CreateProductDto } from './dtos/create-product.dto';
+import { TargetType } from '@prisma/client';
+
+type NormalizedProductPayload = {
+  name: string;
+  description?: string | null;
+  reference_price: number;
+  stock_quantity: number;
+  unit: string;
+  location?: string | null;
+  certification?: string | null;
+  category_id: number;
+  min_negotiation_qty?: number | null;
+  is_active: boolean;
+  image_urls: string[];
+};
 
 @Injectable()
 export class ProductsService {
   constructor(private readonly db: DatabaseService) {}
 
-  // 1. Tạo sản phẩm (Giữ nguyên)
-  async create(sellerId: string, dto: CreateProductDto) {
-    return this.db.product.create({
-      data: {
-        name: dto.name,
-        description: dto.description,
-        reference_price: dto.reference_price,
-        stock_quantity: dto.stock_quantity,
-        unit: dto.unit,
-        location: dto.location,
-        certification: dto.certification,
-        seller_id: sellerId,
-        category_id: dto.category_id,
-        min_negotiation_qty: dto.min_negotiation_qty ?? null,
-      },
-    });
+  // 1) Normalize incoming payload (supports FE aliases: price, stock, category slug,...)
+  private async normalizePayload(dto: CreateProductDto): Promise<NormalizedProductPayload> {
+    const referencePrice = dto.reference_price ?? dto.price;
+    const stockQuantity = dto.stock_quantity ?? dto.stock;
+
+    if (referencePrice === undefined || stockQuantity === undefined) {
+      throw new BadRequestException('Giá và số lượng tồn kho là bắt buộc.');
+    }
+
+    const categoryId = await this.resolveCategoryId(dto.category_id ?? dto.category);
+
+    const minNegotiation = dto.min_negotiation_qty === 0
+      ? null
+      : dto.min_negotiation_qty ?? null;
+
+    const imageUrls = this.normalizeImageUrls(dto.image_urls);
+
+    const stockNumber = Number(stockQuantity);
+
+    return {
+      name: dto.name,
+      description: dto.description ?? null,
+      reference_price: Number(referencePrice),
+      stock_quantity: stockNumber,
+      unit: dto.unit ?? 'kg',
+      location: dto.location ?? dto.origin ?? null,
+      certification: dto.certification ?? null,
+      category_id: categoryId,
+      min_negotiation_qty: minNegotiation,
+      is_active: stockNumber > 0,
+      image_urls: imageUrls,
+    };
   }
 
-  // 2. Lấy sản phẩm của Shop (Giữ nguyên)
+  private normalizeImageUrls(urls?: string[] | string): string[] {
+    if (!urls) return [];
+    if (Array.isArray(urls)) return urls.filter(Boolean);
+    return [urls].filter(Boolean);
+  }
+
+  private async resolveCategoryId(categoryInput?: number | string): Promise<number> {
+    if (categoryInput === undefined || categoryInput === null) {
+      throw new BadRequestException('Danh mục là bắt buộc.');
+    }
+
+    // Numeric id
+    const numeric = Number(categoryInput);
+    if (!Number.isNaN(numeric) && numeric > 0) {
+      return numeric;
+    }
+
+    const slugToName: Record<string, string> = {
+      'trai-cay': 'Trái cây',
+      'rau-cu': 'Rau củ',
+      'ngu-coc': 'Ngũ cốc',
+      'gia-vi': 'Gia vị',
+      khac: 'Khác',
+    };
+
+    const categoryStr = String(categoryInput).trim();
+    const categoryName = slugToName[categoryStr] ?? categoryStr;
+
+    const category = await this.db.category.findFirst({
+      where: { name: { equals: categoryName, mode: 'insensitive' } },
+    });
+
+    if (!category) {
+      throw new BadRequestException('Danh mục không hợp lệ.');
+    }
+
+    return category.id;
+  }
+
+  private mapAttachmentsByTarget(attachments: { target_id: string; url: string }[]) {
+    return attachments.reduce((acc, a) => {
+      if (!acc[a.target_id]) acc[a.target_id] = [];
+      acc[a.target_id].push(a.url);
+      return acc;
+    }, {} as Record<string, string[]>);
+  }
+
+  // 2) Tạo sản phẩm
+  async create(sellerId: string, dto: CreateProductDto, files: Express.Multer.File[] = []) {
+    const payload = await this.normalizePayload(dto);
+
+    const product = await this.db.product.create({
+      data: {
+        name: payload.name,
+        description: payload.description,
+        reference_price: payload.reference_price,
+        stock_quantity: payload.stock_quantity,
+        unit: payload.unit,
+        location: payload.location,
+        certification: payload.certification,
+        seller_id: sellerId,
+        category_id: payload.category_id,
+        min_negotiation_qty: payload.min_negotiation_qty,
+        is_active: payload.is_active,
+      },
+    });
+
+    const uploadedUrls = files.map((file) => `/uploads/products/${file.filename}`);
+    const allUrls = [...payload.image_urls, ...uploadedUrls];
+
+    if (allUrls.length > 0) {
+      await this.db.attachment.createMany({
+        data: allUrls.map((url) => ({
+          url,
+          file_type: 'IMAGE',
+          target_id: product.id,
+          target_type: TargetType.PRODUCT,
+        })),
+      });
+    }
+
+    return product;
+  }
+
+  // 3) Lấy sản phẩm của Shop
   async findAllBySeller(sellerId: string) {
     const products = await this.db.product.findMany({
       where: { seller_id: sellerId },
       orderBy: { created_at: 'desc' },
-      include: { category: true },
+      include: {
+        category: true,
+        order_items: { include: { order: true } },
+      },
     });
-    
-    // Lấy thêm ảnh nếu cần (để đơn giản ở bước này ta trả về luôn)
-    return products;
+
+    if (products.length === 0) return [];
+
+    const productIds = products.map((p) => p.id);
+    const attachments = await this.db.attachment.findMany({
+      where: { target_id: { in: productIds }, target_type: TargetType.PRODUCT },
+      select: { target_id: true, url: true },
+    });
+    const imageMap = this.mapAttachmentsByTarget(attachments);
+
+    // Đồng bộ trạng thái is_active theo tồn kho (0 => hết hàng => false, >0 => true)
+    const activationUpdates = products
+      .map((p) => {
+        const inStock = Number(p.stock_quantity) > 0;
+        const shouldBeActive = inStock;
+        return shouldBeActive !== p.is_active
+          ? { id: p.id, is_active: shouldBeActive }
+          : null;
+      })
+      .filter(Boolean) as { id: string; is_active: boolean }[];
+
+    if (activationUpdates.length > 0) {
+      await Promise.all(
+        activationUpdates.map((u) =>
+          this.db.product.update({ where: { id: u.id }, data: { is_active: u.is_active } }),
+        ),
+      );
+    }
+
+    return products.map((p) => {
+      const sold = p.order_items
+        .filter((item) => item.order.status === 'COMPLETED')
+        .reduce((sum, item) => sum + Number(item.quantity), 0);
+
+      const stock = Number(p.stock_quantity);
+      const isActive = stock > 0 && p.is_active;
+
+      return {
+        id: p.id,
+        name: p.name,
+        price: Number(p.reference_price),
+        stock,
+        description: p.description ?? '',
+        images: imageMap[p.id] ?? [],
+        category: p.category?.name ?? '',
+        unit: p.unit,
+        origin: p.location ?? '',
+        rating: 5,
+        sold,
+        is_active: isActive,
+        status: stock > 0 ? 'IN_STOCK' : 'OUT_OF_STOCK',
+        created_at: p.created_at,
+        min_negotiation_qty: p.min_negotiation_qty
+          ? Number(p.min_negotiation_qty)
+          : null,
+      };
+    });
   }
 
   // --- 3. Lấy tất cả sản phẩm cho Trang chủ (Public) ---
@@ -82,33 +259,36 @@ export class ProductsService {
       {} as Record<string, string>,
     );
 
-    return products.map((p) => ({
-      id: p.id,
-      name: p.name,
-      slug: p.id,
-      price: Number(p.reference_price),
-      originalPrice: Number(p.reference_price) * 1.2,
-      unit: p.unit,
-      category: p.category.name,
-      origin: p.location || 'Việt Nam',
-      images: imageMap[p.id]?.length ? imageMap[p.id] : ['https://via.placeholder.com/300'],
-      description: p.description,
-      stock: Number(p.stock_quantity),
-      // Top-level seller_id — FE có thể dùng làm fallback
-      seller_id: p.seller_id,
-      // Backward-compat
-      shopName: p.seller?.profile?.store_name || p.seller.full_name,
-      // Structured shop object — FE dùng để group giỏ hàng
-      shop: {
-        id: p.seller_id,
-        store_name: p.seller?.profile?.store_name || p.seller.full_name,
-        avatar_url: avatarMap[p.seller_id] ?? null,
-      },
-      rating: 5,
-      reviewCount: 0,
-      sold: 0,
-      min_negotiation_qty: p.min_negotiation_qty ? Number(p.min_negotiation_qty) : null,
-    }));
+    return products.map((p) => {
+      const stock = Number(p.stock_quantity);
+      const isActive = stock > 0 && p.is_active;
+
+      return {
+        id: p.id,
+        name: p.name,
+        slug: p.id,
+        price: Number(p.reference_price),
+        originalPrice: Number(p.reference_price) * 1.2,
+        unit: p.unit,
+        category: p.category.name,
+        origin: p.location || 'Việt Nam',
+        images: imageMap[p.id]?.length ? imageMap[p.id] : ['https://via.placeholder.com/300'],
+        description: p.description,
+        stock,
+        is_active: isActive,
+        seller_id: p.seller_id,
+        shopName: p.seller?.profile?.store_name || p.seller.full_name,
+        shop: {
+          id: p.seller_id,
+          store_name: p.seller?.profile?.store_name || p.seller.full_name,
+          avatar_url: avatarMap[p.seller_id] ?? null,
+        },
+        rating: 5,
+        reviewCount: 0,
+        sold: 0,
+        min_negotiation_qty: p.min_negotiation_qty ? Number(p.min_negotiation_qty) : null,
+      };
+    });
   }
   async findOnePublic(id: string) {
     const p = await this.db.product.findUnique({
@@ -196,6 +376,9 @@ export class ProductsService {
       seller_replied_at: r.seller_replied_at ?? null,
     }));
 
+    const stock = Number(p.stock_quantity);
+    const isActive = p.is_active && stock > 0;
+
     return { 
       id: p.id,
       name: p.name,
@@ -211,8 +394,8 @@ export class ProductsService {
       sold: soldQuantity,
       unit: p.unit,
       seller_id: p.seller_id,
-      stock: Number(p.stock_quantity),
-      is_active: p.is_active,
+      stock,
+      is_active: isActive,
       brand: p.seller?.profile?.store_name || 'Nông sản Việt',
       shop: {
         id: p.seller.id,
@@ -232,28 +415,67 @@ export class ProductsService {
   }
 
   // ─── PATCH /products/:id — Cập nhật sản phẩm (SELLER) ──────────────────
-  async updateProduct(sellerId: string, productId: string, dto: Partial<CreateProductDto>) {
+  async updateProduct(
+    sellerId: string,
+    productId: string,
+    dto: Partial<CreateProductDto>,
+    files: Express.Multer.File[] = [],
+  ) {
     const product = await this.db.product.findUnique({ where: { id: productId } });
     if (!product) throw new NotFoundException('Sản phẩm không tồn tại.');
     if (product.seller_id !== sellerId)
       throw new ForbiddenException('Bạn không có quyền chỉnh sửa sản phẩm này.');
 
-    return this.db.product.update({
+    const categoryId = dto.category_id ?? dto.category
+      ? await this.resolveCategoryId(dto.category_id ?? dto.category)
+      : undefined;
+
+    const stockValue = dto.stock_quantity ?? dto.stock;
+    const nextStock = stockValue !== undefined ? Number(stockValue) : Number(product.stock_quantity);
+
+    const minNegotiation = dto.min_negotiation_qty === undefined
+      ? undefined
+      : dto.min_negotiation_qty === 0
+        ? null
+        : dto.min_negotiation_qty;
+
+    const updated = await this.db.product.update({
       where: { id: productId },
       data: {
-        name: dto.name,
-        description: dto.description,
-        reference_price: dto.reference_price,
-        stock_quantity: dto.stock_quantity,
-        unit: dto.unit,
-        location: dto.location,
-        certification: dto.certification,
-        category_id: dto.category_id,
-        ...(dto.min_negotiation_qty !== undefined && {
-          min_negotiation_qty: dto.min_negotiation_qty === 0 ? null : dto.min_negotiation_qty,
-        }),
+        ...(dto.name !== undefined ? { name: dto.name } : {}),
+        ...(dto.description !== undefined ? { description: dto.description } : {}),
+        ...(dto.reference_price !== undefined || dto.price !== undefined
+          ? { reference_price: Number(dto.reference_price ?? dto.price) }
+          : {}),
+        ...(stockValue !== undefined ? { stock_quantity: nextStock } : {}),
+        ...(dto.unit !== undefined ? { unit: dto.unit } : {}),
+        ...(dto.location !== undefined || dto.origin !== undefined
+          ? { location: dto.location ?? dto.origin ?? null }
+          : {}),
+        ...(dto.certification !== undefined ? { certification: dto.certification } : {}),
+        ...(categoryId !== undefined ? { category_id: categoryId } : {}),
+        ...(minNegotiation !== undefined ? { min_negotiation_qty: minNegotiation } : {}),
+        is_active: nextStock > 0,
       },
     });
+
+    const appendedUrls = [
+      ...this.normalizeImageUrls(dto.image_urls as any),
+      ...files.map((file) => `/uploads/products/${file.filename}`),
+    ];
+
+    if (appendedUrls.length > 0) {
+      await this.db.attachment.createMany({
+        data: appendedUrls.map((url) => ({
+          url,
+          file_type: 'IMAGE',
+          target_id: productId,
+          target_type: TargetType.PRODUCT,
+        })),
+      });
+    }
+
+    return updated;
   }
 
   // ─── DELETE /products/:id — Xóa/ẩn sản phẩm (SELLER) ──────────────────

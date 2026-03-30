@@ -1,10 +1,40 @@
-import { Controller, Post, Get, Patch, Delete, Body, Request, UseGuards, Param, Query } from '@nestjs/common';
+import {
+  Controller,
+  Post,
+  Get,
+  Patch,
+  Delete,
+  Body,
+  Request,
+  UseGuards,
+  Param,
+  UploadedFiles,
+  UseInterceptors,
+} from '@nestjs/common';
 import { ProductsService } from './products.service';
 import { CreateProductDto } from './dtos/create-product.dto';
 import { AuthGuard } from '@nestjs/passport'; 
 import { RolesGuard } from '../auth/decorators/guards/roles.guard'; // (Nhớ check đường dẫn file roles.guard của bạn)
 import { Roles } from '../auth/decorators/roles.decorator'; 
 import { UserRole } from '@prisma/client';
+import { AnyFilesInterceptor } from '@nestjs/platform-express';
+import { diskStorage } from 'multer';
+import { extname, join } from 'path';
+import * as fs from 'fs';
+
+const PRODUCT_UPLOAD_DIR = join(__dirname, '..', '..', '..', 'public', 'uploads', 'products');
+fs.mkdirSync(PRODUCT_UPLOAD_DIR, { recursive: true });
+
+const multerOptions = {
+  storage: diskStorage({
+    destination: PRODUCT_UPLOAD_DIR,
+    filename: (_req, file, cb) => {
+      const unique = `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
+      cb(null, `${unique}${extname(file.originalname)}`);
+    },
+  }),
+  limits: { fileSize: 5 * 1024 * 1024, files: 6 },
+};
 
 @Controller('products')
 export class ProductsController {
@@ -13,11 +43,13 @@ export class ProductsController {
   @UseGuards(AuthGuard('jwt'), RolesGuard) 
   @Roles(UserRole.SELLER)
   @Post()
-  create(@Request() req, @Body() dto: CreateProductDto) {
-    return this.productsService.create(req.user.sub, dto);
+  @UseInterceptors(AnyFilesInterceptor(multerOptions))
+  create(@Request() req, @Body() dto: CreateProductDto, @UploadedFiles() files: Express.Multer.File[]) {
+    return this.productsService.create(req.user.sub, dto, files);
   }
 
-  @UseGuards(AuthGuard('jwt'))
+  @UseGuards(AuthGuard('jwt'), RolesGuard)
+  @Roles(UserRole.SELLER)
   @Get('my-products')
   findAllMyProducts(@Request() req) {
     return this.productsService.findAllBySeller(req.user.sub);
@@ -45,8 +77,14 @@ export class ProductsController {
   @UseGuards(AuthGuard('jwt'), RolesGuard)
   @Roles(UserRole.SELLER)
   @Patch(':id')
-  async updateProduct(@Request() req, @Param('id') id: string, @Body() dto: Partial<import('./dtos/create-product.dto').CreateProductDto>) {
-    return this.productsService.updateProduct(req.user.sub, id, dto);
+  @UseInterceptors(AnyFilesInterceptor(multerOptions))
+  async updateProduct(
+    @Request() req,
+    @Param('id') id: string,
+    @Body() dto: Partial<import('./dtos/create-product.dto').CreateProductDto>,
+    @UploadedFiles() files: Express.Multer.File[],
+  ) {
+    return this.productsService.updateProduct(req.user.sub, id, dto, files);
   }
 
   // DELETE /products/:id — Ẩn sản phẩm
