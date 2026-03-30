@@ -1,4 +1,4 @@
-import { Injectable, BadRequestException, UnauthorizedException, HttpException, HttpStatus } from '@nestjs/common';
+import { Injectable, BadRequestException, UnauthorizedException, HttpException, HttpStatus, ServiceUnavailableException } from '@nestjs/common';
 import { DatabaseService } from '../../database/database.service';
 import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcrypt';
@@ -20,6 +20,9 @@ export class AuthService {
 
   // --- 1. ĐĂNG KÝ (TẠO TÀI KHOẢN & GỬI OTP) ---
   async register(dto: RegisterDto) {
+    const otpEnabled = process.env.ENABLE_EMAIL_OTP !== 'false';
+    const bypassOtpOnError = process.env.BYPASS_EMAIL_OTP_ON_ERROR === 'true';
+
     // 1. Kiểm tra email đã tồn tại chưa
     const existingUser = await this.databaseService.user.findUnique({
       where: { email: dto.email },
@@ -46,20 +49,45 @@ export class AuthService {
         password_hash: hashedPassword,
         full_name: dto.full_name,
         role: dto.role,
-        verified_email: false, // Quan trọng: Đánh dấu chưa xác thực
+        verified_email: !otpEnabled, // Nếu tắt OTP (dev) thì auto verify
       },
     });
 
-    // 4. Sinh mã OTP và lưu vào DB
-    const verification = await this.verificationService.createVerification(newUser.id);
+    // 4. Nếu bật OTP: sinh mã + gửi mail, nếu lỗi có thể bypass theo env
+    if (otpEnabled) {
+      try {
+        const verification = await this.verificationService.createVerification(newUser.id);
+        await this.emailService.sendVerificationOTP(newUser.email, verification.code, newUser.full_name);
 
-    // 5. Gửi mã OTP đó qua Email
-    await this.emailService.sendVerificationOTP(newUser.email, verification.code, newUser.full_name);
+        return {
+          message: 'Đăng ký thành công bước 1. Vui lòng kiểm tra email để lấy mã OTP.',
+          userId: newUser.id,
+          emailSent: true,
+        };
+      } catch (err) {
+        if (bypassOtpOnError) {
+          // Cho môi trường dev/staging: nếu gửi mail thất bại, tự xác thực để không chặn đăng ký
+          await this.databaseService.user.update({
+            where: { id: newUser.id },
+            data: { verified_email: true },
+          });
+          return {
+            message: 'Email OTP không gửi được (bỏ qua trong môi trường dev). Tài khoản đã được kích hoạt.',
+            userId: newUser.id,
+            emailSent: false,
+            autoVerified: true,
+          };
+        }
+        throw new ServiceUnavailableException('Không gửi được email OTP, vui lòng thử lại sau.');
+      }
+    }
 
-    // 6. Trả về userId để Frontend làm bước tiếp theo (hiển thị form nhập OTP)
+    // Nếu OTP tắt hoàn toàn (dev mode)
     return {
-      message: 'Đăng ký thành công bước 1. Vui lòng kiểm tra email để lấy mã OTP.',
+      message: 'Đăng ký thành công (DEV: OTP bị tắt, tài khoản đã xác thực).',
       userId: newUser.id,
+      emailSent: false,
+      autoVerified: true,
     };
   }
 

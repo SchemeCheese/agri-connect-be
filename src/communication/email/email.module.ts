@@ -11,10 +11,18 @@ import { join } from 'path';
         transport: {
           host: process.env.MAIL_HOST,
           port: Number(process.env.MAIL_PORT) || 587,
-          secure: false, // Sử dụng TLS
+          secure: Number(process.env.MAIL_PORT) === 465, // 465 = SSL, 587 = STARTTLS
+          requireTLS: Number(process.env.MAIL_PORT) === 587,
+          connectionTimeout: 10000,
+          socketTimeout: 10000,
+          family: 4, // Ưu tiên IPv4 tránh lỗi ENETUNREACH IPv6
           auth: {
             user: process.env.MAIL_USER,
             pass: process.env.MAIL_PASS, // Mật khẩu ứng dụng 16 ký tự
+          },
+          tls: {
+            rejectUnauthorized: false,
+            servername: process.env.MAIL_HOST,
           },
         },
         defaults: {
