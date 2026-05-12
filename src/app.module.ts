@@ -3,6 +3,7 @@ import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { DatabaseModule } from './database/database.module';
 import { AuthModule } from './modules/auth/auth.module';
+import { FirebaseModule } from './modules/firebase/firebase.module';
 import { ProductsModule } from './modules/products/products.module';
 import { OrdersModule } from './modules/orders/orders.module';
 import { ChatModule } from './modules/chat/chat.module';
@@ -16,6 +17,7 @@ import { PaymentsModule } from './modules/payments/payments.module';
 @Module({
   imports: [
     DatabaseModule,
+    FirebaseModule,
     AuthModule,
     ProductsModule,
     OrdersModule,

@@ -4,9 +4,12 @@ import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcrypt';
 import { RegisterDto } from './dtos/register.dto';
 import { LoginDto } from './dtos/login.dto';
+import { FirebaseAuthDto } from './dtos/firebase-auth.dto';
 // THÊM IMPORT:
 import { EmailService } from '../../communication/email/email.service';
 import { VerificationService } from './verification.service';
+import { FirebaseService } from '../firebase/firebase.service';
+import { UserRole } from '@prisma/client';
 
 @Injectable()
 export class AuthService {
@@ -16,6 +19,7 @@ export class AuthService {
     // INJECT THÊM 2 SERVICE NÀY:
     private readonly emailService: EmailService,
     private readonly verificationService: VerificationService,
+    private readonly firebaseService: FirebaseService,
   ) {}
 
   // --- 1. ĐĂNG KÝ (TẠO TÀI KHOẢN & GỬI OTP) ---
@@ -122,6 +126,12 @@ export class AuthService {
     }
 
     // 2. Kiểm tra mật khẩu
+    // Tài khoản Google (OAuth) không có password_hash — không cho đăng nhập bằng mật khẩu
+    if (!user.password_hash) {
+      throw new UnauthorizedException(
+        'Tài khoản này được đăng ký qua Google. Vui lòng đăng nhập bằng Google.',
+      );
+    }
     const isMatch = await bcrypt.compare(dto.password, user.password_hash);
     if (!isMatch) {
       throw new UnauthorizedException('Email hoặc mật khẩu không đúng');
@@ -140,6 +150,85 @@ export class AuthService {
         full_name: user.full_name,
         role: user.role,
         avatar: '', // Có thể nối bảng lấy avatar sau
+      },
+    };
+  }
+
+  // --- 4. ĐĂNG NHẬP BẰNG FIREBASE (GOOGLE SIGN-IN) ---
+  async loginWithFirebase(dto: FirebaseAuthDto) {
+    // 1. Xác thực Firebase ID token với Firebase Admin SDK
+    const decoded = await this.firebaseService.verifyIdToken(dto.idToken);
+
+    const { uid, email, name, picture } = decoded;
+
+    if (!email) {
+      throw new UnauthorizedException(
+        'Tài khoản Google không có địa chỉ email. Vui lòng dùng tài khoản khác.',
+      );
+    }
+
+    // 2. Tìm user theo firebase_uid trước, sau đó fallback sang email
+    let user = await this.databaseService.user.findUnique({
+      where: { firebase_uid: uid },
+    });
+
+    if (!user) {
+      // Kiểm tra xem email đã tồn tại chưa (tài khoản email/password cũ)
+      const existingByEmail = await this.databaseService.user.findUnique({
+        where: { email },
+      });
+
+      if (existingByEmail) {
+        // Liên kết firebase_uid vào tài khoản email/password hiện có
+        user = await this.databaseService.user.update({
+          where: { email },
+          data: {
+            firebase_uid: uid,
+            // Đảm bảo tài khoản được kích hoạt khi đăng nhập qua Google
+            verified_email: true,
+          },
+        });
+      } else {
+        // Tạo tài khoản mới cho người dùng Google lần đầu đăng nhập
+        user = await this.databaseService.user.create({
+          data: {
+            email,
+            firebase_uid: uid,
+            full_name: name ?? email.split('@')[0],
+            role: dto.role ?? UserRole.BUYER,
+            // Firebase đã xác thực email — không cần OTP
+            verified_email: true,
+            // password_hash để null vì đây là tài khoản OAuth
+          },
+        });
+
+        // Tạo Profile rỗng cho user mới
+        await this.databaseService.profile.create({
+          data: {
+            user_id: user.id,
+            ...(picture ? { cover_url: picture } : {}),
+          },
+        });
+      }
+    }
+
+    if (!user.is_active) {
+      throw new UnauthorizedException('Tài khoản của bạn đã bị vô hiệu hóa.');
+    }
+
+    // 3. Phát hành JWT nội bộ — giống hệt flow email/password
+    const payload = { sub: user.id, email: user.email, role: user.role };
+    const access_token = await this.jwtService.signAsync(payload);
+
+    return {
+      message: 'Đăng nhập bằng Google thành công',
+      access_token,
+      user: {
+        id: user.id,
+        email: user.email,
+        full_name: user.full_name,
+        role: user.role,
+        avatar: picture ?? '',
       },
     };
   }

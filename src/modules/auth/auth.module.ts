@@ -8,6 +8,7 @@ import { PassportModule } from '@nestjs/passport';
 // THÊM 2 IMPORT NÀY:
 import { EmailModule } from '../../communication/email/email.module';
 import { VerificationService } from './verification.service';
+import { FirebaseModule } from '../firebase/firebase.module';
 
 
 @Module({
@@ -15,6 +16,7 @@ import { VerificationService } from './verification.service';
     PassportModule,
     DatabaseModule,
     EmailModule, // <- Đã thêm EmailModule vào đây
+    FirebaseModule,
     JwtModule.register({
       global: true,
       secret: process.env.JWT_SECRET || 'secretKeyCuaBan',

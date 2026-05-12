@@ -77,7 +77,8 @@ enum AccountIdentifier {
 model User {
   id             String    @id @default(cuid())
   email          String    @unique
-  password_hash  String
+  password_hash  String?   // Nullable: Firebase/OAuth users may not have a password
+  firebase_uid   String?   @unique // Firebase UID for Google / social sign-in users
   role           UserRole  @default(BUYER)
   full_name      String
   phone_number   String?
