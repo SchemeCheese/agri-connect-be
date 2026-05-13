@@ -2,6 +2,7 @@ import { Controller, Post, Body } from '@nestjs/common';
 import { AuthService } from './auth.service';
 import { RegisterDto } from './dtos/register.dto';
 import { LoginDto } from './dtos/login.dto';
+import { FirebaseLoginDto } from './dtos/firebase-login.dto';
 
 @Controller('auth')
 export class AuthController {
@@ -15,6 +16,11 @@ export class AuthController {
   @Post('login')
   login(@Body() dto: LoginDto) {
     return this.authService.login(dto);
+  }
+
+  @Post('firebase')
+  firebaseLogin(@Body() dto: FirebaseLoginDto) {
+    return this.authService.loginWithFirebase(dto);
   }
 
   // THÊM API MỚI CHO OTP

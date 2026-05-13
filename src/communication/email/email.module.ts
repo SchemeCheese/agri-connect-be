@@ -1,6 +1,6 @@
 import { Module } from '@nestjs/common';
 import { MailerModule } from '@nestjs-modules/mailer';
-import { HandlebarsAdapter } from '@nestjs-modules/mailer/dist/adapters/handlebars.adapter';
+import { HandlebarsAdapter } from '@nestjs-modules/mailer/adapters/handlebars.adapter';
 import { EmailService } from './email.service';
 import { join } from 'path';
 
@@ -29,8 +29,7 @@ import { join } from 'path';
           from: process.env.MAIL_FROM || '"Agri Connect" <noreply@agriconnect.com>',
         },
         template: {
-          // SỬA DÒNG NÀY: Dùng process.cwd() để trỏ từ thư mục gốc của project
-          dir: join(process.cwd(), 'src/communication/email/templates'),
+          dir: join(__dirname, 'templates'),
           adapter: new HandlebarsAdapter(),
           options: {
             strict: true,

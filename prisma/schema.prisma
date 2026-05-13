@@ -66,6 +66,14 @@ enum QuoteStatus {
   REJECTED  // Buyer từ chối
 }
 
+enum BehaviorAction {
+  VIEW_PRODUCT
+  SEARCH
+  ADD_TO_CART
+  START_CHAT
+  PURCHASE
+}
+
 // --- Enum mới cho OTP (Theo repo mẫu) ---
 enum AccountIdentifier {
   EMAIL
@@ -100,9 +108,12 @@ model User {
   reviews        Review[]
   vouchers        Voucher[]
   saved_vouchers  SavedVoucher[]
-  
+  behaviors      UserBehavior[]
+
   // Liên kết với bảng Verification
   verifications  Verification[]
+  recommendation_cache RecommendationCache?
+  ai_sessions    AISession[]
 }
 
 model Profile {
@@ -312,4 +323,75 @@ model Verification {
 
   @@index([userId])
   @@index([code])
+}
+
+model UserBehavior {
+  id         String         @id @default(cuid())
+  user_id    String?
+  user       User?          @relation(fields: [user_id], references: [id], onDelete: SetNull)
+  session_id String?
+  action     BehaviorAction
+  target_id  String?
+  metadata   Json?
+  weight     Float          @default(1)
+  created_at DateTime       @default(now())
+
+  @@index([user_id, created_at])
+  @@index([session_id, created_at])
+  @@index([action, created_at])
+  @@index([target_id, created_at])
+}
+
+model RecommendationCache {
+  id         String   @id @default(cuid())
+  user_id    String   @unique
+  user       User     @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  data       Json
+  updated_at DateTime @updatedAt
+  created_at DateTime @default(now())
+
+  @@index([updated_at])
+}
+
+// ─── AI Assistant ───────────────────────────────────────────────────────────
+
+enum AIMode {
+  BUYER
+  SELLER
+}
+
+enum AIRole {
+  USER
+  ASSISTANT
+}
+
+model AISession {
+  id                String      @id @default(cuid())
+  user_id           String
+  user              User        @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  mode              AIMode      @default(BUYER)
+  context           Json?       // { productId?, shopId?, conversationId? }
+  summary           String?     @db.Text  // Tóm tắt messages cũ khi > 12 messages
+  total_tokens_used Int         @default(0)
+  messages          AIMessage[]
+  created_at        DateTime    @default(now())
+  updated_at        DateTime    @updatedAt
+
+  @@index([user_id, updated_at])
+}
+
+model AIMessage {
+  id           String    @id @default(cuid())
+  session_id   String
+  session      AISession @relation(fields: [session_id], references: [id], onDelete: Cascade)
+  role         AIRole
+  content      String    @db.Text
+  tokens_used  Int?
+  model_used   String?   // "llama-3.1-8b-instant" | "llama-3.3-70b-versatile"
+  intent       String?   // Intent được classify cho message này
+  tools_called String[]  @default([])
+  rag_sources  Json?     // { productIds: [], sellerIds: [] } — Phase 2
+  created_at   DateTime  @default(now())
+
+  @@index([session_id, created_at])
 }

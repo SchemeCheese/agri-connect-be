@@ -1,9 +1,13 @@
-import { Injectable, BadRequestException, UnauthorizedException, HttpException, HttpStatus, ServiceUnavailableException } from '@nestjs/common';
+import { Injectable, BadRequestException, UnauthorizedException, ServiceUnavailableException } from '@nestjs/common';
 import { DatabaseService } from '../../database/database.service';
 import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcrypt';
+import { randomBytes } from 'crypto';
 import { RegisterDto } from './dtos/register.dto';
 import { LoginDto } from './dtos/login.dto';
+import { FirebaseLoginDto } from './dtos/firebase-login.dto';
+import { getAuth } from 'firebase-admin/auth';
+import { cert, getApps, initializeApp } from 'firebase-admin/app';
 // THÊM IMPORT:
 import { EmailService } from '../../communication/email/email.service';
 import { VerificationService } from './verification.service';
@@ -17,6 +21,40 @@ export class AuthService {
     private readonly emailService: EmailService,
     private readonly verificationService: VerificationService,
   ) {}
+
+  private ensureFirebaseApp() {
+    if (getApps().length > 0) return;
+
+    const projectId = process.env.FIREBASE_PROJECT_ID;
+    const clientEmail = process.env.FIREBASE_CLIENT_EMAIL;
+    const privateKey = process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n');
+
+    if (!projectId || !clientEmail || !privateKey) {
+      throw new ServiceUnavailableException('Firebase config is missing on the server.');
+    }
+
+    initializeApp({
+      credential: cert({
+        projectId,
+        clientEmail,
+        privateKey,
+      }),
+    });
+  }
+
+  private buildAuthResponse(user: { id: string; email: string; full_name: string; role: string; avatar?: string | null }, accessToken: string, avatar?: string | null) {
+    return {
+      message: 'Đăng nhập thành công',
+      access_token: accessToken,
+      user: {
+        id: user.id,
+        email: user.email,
+        full_name: user.full_name,
+        role: user.role,
+        avatar: avatar ?? '',
+      },
+    };
+  }
 
   // --- 1. ĐĂNG KÝ (TẠO TÀI KHOẢN & GỬI OTP) ---
   async register(dto: RegisterDto) {
@@ -57,7 +95,10 @@ export class AuthService {
     if (otpEnabled) {
       try {
         const verification = await this.verificationService.createVerification(newUser.id);
-        await this.emailService.sendVerificationOTP(newUser.email, verification.code, newUser.full_name);
+        const ok = await this.emailService.sendVerificationOTP(newUser.email, verification.code, newUser.full_name);
+        if (!ok) {
+          throw new Error('EmailService returned false');
+        }
 
         return {
           message: 'Đăng ký thành công bước 1. Vui lòng kiểm tra email để lấy mã OTP.',
@@ -131,16 +172,61 @@ export class AuthService {
     const payload = { sub: user.id, email: user.email, role: user.role };
     const access_token = await this.jwtService.signAsync(payload);
 
-    return {
-      message: 'Đăng nhập thành công',
-      access_token: access_token,
-      user: {
-        id: user.id,
-        email: user.email,
-        full_name: user.full_name,
-        role: user.role,
-        avatar: '', // Có thể nối bảng lấy avatar sau
-      },
-    };
+    return this.buildAuthResponse(user, access_token);
+  }
+
+  async loginWithFirebase(dto: FirebaseLoginDto) {
+    this.ensureFirebaseApp();
+
+    let decoded: import('firebase-admin/auth').DecodedIdToken;
+    try {
+      decoded = await getAuth().verifyIdToken(dto.idToken);
+    } catch {
+      throw new UnauthorizedException('Firebase ID token không hợp lệ hoặc đã hết hạn.');
+    }
+
+    const email = decoded.email?.trim().toLowerCase();
+    if (!email) {
+      throw new UnauthorizedException('Google account không có email hợp lệ.');
+    }
+
+    const firebaseName = decoded.name?.trim();
+    const firebasePhoto = decoded.picture?.trim();
+
+    let user = await this.databaseService.user.findUnique({
+      where: { email },
+    });
+
+    if (!user) {
+      user = await this.databaseService.user.create({
+        data: {
+          email,
+          password_hash: randomBytes(32).toString('hex'),
+          full_name: firebaseName || email.split('@')[0],
+          role: dto.role || 'BUYER',
+          verified_email: true,
+        },
+      });
+    } else {
+      const shouldUpdateName = firebaseName && (!user.full_name || user.full_name === user.email.split('@')[0]);
+      if (!user.verified_email || shouldUpdateName) {
+        user = await this.databaseService.user.update({
+          where: { id: user.id },
+          data: {
+            verified_email: true,
+            ...(shouldUpdateName ? { full_name: firebaseName } : {}),
+          },
+        });
+      }
+    }
+
+    const payload = { sub: user.id, email: user.email, role: user.role };
+    const access_token = await this.jwtService.signAsync(payload);
+
+    return this.buildAuthResponse(
+      user,
+      access_token,
+      firebasePhoto || undefined,
+    );
   }
 }
