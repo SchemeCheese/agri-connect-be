@@ -51,7 +51,7 @@ export class AIAssistantGateway implements OnGatewayConnection, OnGatewayDisconn
       });
 
       client.data.userId = payload.sub;
-      client.data.userRole = payload.role;
+      client.data.userRole = { is_buyer: payload.is_buyer, is_seller: payload.is_seller };
       this.connectedUsers.set(payload.sub, client.id);
 
       this.logger.log(`[AI-CHAT] Connected: ${payload.sub}`);

@@ -63,12 +63,12 @@ export class OrdersService {
                     // Xác thực seller tồn tại
                     const seller = await prisma.user.findUnique({
                         where: { id: sellerId },
-                        select: { id: true, role: true },
+                        select: { id: true, is_seller: true },
                     });
                     if (!seller) {
                         throw new NotFoundException(`Người bán (ID: ${sellerId}) không tồn tại.`);
                     }
-                    if (seller.role !== 'SELLER') {
+                    if (!seller.is_seller) {
                         throw new BadRequestException(`ID ${sellerId} không phải SELLER.`);
                     }
 

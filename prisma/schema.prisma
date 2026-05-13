@@ -11,12 +11,6 @@ datasource db {
 }
 
 // --- Enum định nghĩa theo thiết kế của bạn ---
-enum UserRole {
-  BUYER
-  SELLER
-  ADMIN
-}
-
 enum OrderStatus {
   PENDING          // Chờ người bán xác nhận
   CONFIRMED        // Người bán đã xác nhận
@@ -86,7 +80,9 @@ model User {
   id             String    @id @default(cuid())
   email          String    @unique
   password_hash  String
-  role           UserRole  @default(BUYER)
+  is_buyer       Boolean   @default(false)
+  is_seller      Boolean   @default(false)
+  is_admin       Boolean   @default(false)
   full_name      String
   phone_number   String?
   

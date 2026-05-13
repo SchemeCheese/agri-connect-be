@@ -15,7 +15,7 @@ import { ValidateVoucherDto } from './dtos/validate-voucher.dto';
 import { JwtAuthGuard } from '../auth/decorators/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/decorators/guards/roles.guard';
 import { Roles } from '../auth/decorators/roles.decorator';
-import { UserRole } from '@prisma/client';
+import { UserRole } from '../auth/decorators/roles.decorator';
 
 @Controller('vouchers')
 @UseGuards(JwtAuthGuard)

@@ -496,7 +496,7 @@ export class ProductsService {
   // ─── GET /sellers/:id — Trang chi tiết người bán ────────────────────────
   async findSellerById(sellerId: string) {
     const seller = await this.db.user.findUnique({
-      where: { id: sellerId, role: 'SELLER' },
+      where: { id: sellerId, is_seller: true },
       include: { profile: true },
     });
 

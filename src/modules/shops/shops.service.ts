@@ -15,7 +15,7 @@ export class ShopsService {
     // 1. Lấy tất cả seller (có profile)
     const sellers = await this.db.user.findMany({
       where: {
-        role: 'SELLER',
+        is_seller: true,
         is_active: true,
         profile: { isNot: null },
       },

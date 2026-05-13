@@ -6,20 +6,19 @@ import { Injectable } from '@nestjs/common';
 export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
   constructor() {
     super({
-      // Báo cho NestJS biết token nằm ở phần Header (Bearer Token)
       jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
-      ignoreExpiration: false, // Từ chối token đã hết hạn
-      secretOrKey: process.env.JWT_SECRET || 'secretKeyCuaBan', // Phải GIỐNG HỆT chuỗi bí mật trong AuthModule
+      ignoreExpiration: false,
+      secretOrKey: process.env.JWT_SECRET || 'secretKeyCuaBan',
     });
   }
 
-  // Hàm này tự động chạy sau khi token được giải mã thành công
   async validate(payload: any) {
-    // Trả về object này, NestJS sẽ tự động gán nó vào `req.user` ở Controller
-    return { 
-      sub: payload.sub, 
-      email: payload.email, 
-      role: payload.role 
+    return {
+      sub: payload.sub,
+      email: payload.email,
+      is_buyer: payload.is_buyer,
+      is_seller: payload.is_seller,
+      is_admin: payload.is_admin,
     };
   }
 }

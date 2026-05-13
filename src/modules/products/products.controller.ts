@@ -16,7 +16,7 @@ import { CreateProductDto } from './dtos/create-product.dto';
 import { AuthGuard } from '@nestjs/passport'; 
 import { RolesGuard } from '../auth/decorators/guards/roles.guard'; // (Nhớ check đường dẫn file roles.guard của bạn)
 import { Roles } from '../auth/decorators/roles.decorator'; 
-import { UserRole } from '@prisma/client';
+import { UserRole } from '../auth/decorators/roles.decorator';
 import { AnyFilesInterceptor } from '@nestjs/platform-express';
 import { diskStorage } from 'multer';
 import { extname, join } from 'path';

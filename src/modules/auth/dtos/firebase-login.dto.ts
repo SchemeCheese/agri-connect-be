@@ -1,11 +1,14 @@
-import { IsOptional, IsString, IsIn } from 'class-validator';
+import { IsString, IsBoolean, IsOptional } from 'class-validator';
 
 export class FirebaseLoginDto {
   @IsString()
   idToken: string;
 
   @IsOptional()
-  @IsString()
-  @IsIn(['BUYER', 'SELLER', 'ADMIN'])
-  role?: 'BUYER' | 'SELLER' | 'ADMIN';
+  @IsBoolean()
+  is_buyer?: boolean;
+
+  @IsOptional()
+  @IsBoolean()
+  is_seller?: boolean;
 }

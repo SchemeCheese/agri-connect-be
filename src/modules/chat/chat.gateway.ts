@@ -52,7 +52,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
       // Gắn userId vào socket để dùng ở các handler bên dưới
       client.data.userId = payload.sub;
-      client.data.userRole = payload.role;
+      client.data.userRole = { is_buyer: payload.is_buyer, is_seller: payload.is_seller };
       client.data.userName = payload.email;
 
       this.connectedUsers.set(payload.sub, client.id);

@@ -8,7 +8,6 @@ import { LoginDto } from './dtos/login.dto';
 import { FirebaseLoginDto } from './dtos/firebase-login.dto';
 import { getAuth } from 'firebase-admin/auth';
 import { cert, getApps, initializeApp } from 'firebase-admin/app';
-// THÊM IMPORT:
 import { EmailService } from '../../communication/email/email.service';
 import { VerificationService } from './verification.service';
 
@@ -17,7 +16,6 @@ export class AuthService {
   constructor(
     private readonly databaseService: DatabaseService,
     private readonly jwtService: JwtService,
-    // INJECT THÊM 2 SERVICE NÀY:
     private readonly emailService: EmailService,
     private readonly verificationService: VerificationService,
   ) {}
@@ -33,16 +31,18 @@ export class AuthService {
       throw new ServiceUnavailableException('Firebase config is missing on the server.');
     }
 
-    initializeApp({
-      credential: cert({
-        projectId,
-        clientEmail,
-        privateKey,
-      }),
-    });
+    initializeApp({ credential: cert({ projectId, clientEmail, privateKey }) });
   }
 
-  private buildAuthResponse(user: { id: string; email: string; full_name: string; role: string; avatar?: string | null }, accessToken: string, avatar?: string | null) {
+  private buildAuthResponse(
+    user: {
+      id: string; email: string; full_name: string;
+      is_buyer: boolean; is_seller: boolean; is_admin: boolean;
+      avatar?: string | null;
+    },
+    accessToken: string,
+    avatar?: string | null,
+  ) {
     return {
       message: 'Đăng nhập thành công',
       access_token: accessToken,
@@ -50,131 +50,87 @@ export class AuthService {
         id: user.id,
         email: user.email,
         full_name: user.full_name,
-        role: user.role,
+        is_buyer: user.is_buyer,
+        is_seller: user.is_seller,
+        is_admin: user.is_admin,
         avatar: avatar ?? '',
       },
     };
   }
 
-  // --- 1. ĐĂNG KÝ (TẠO TÀI KHOẢN & GỬI OTP) ---
+  private buildJwtPayload(user: { id: string; email: string; is_buyer: boolean; is_seller: boolean; is_admin: boolean }) {
+    return { sub: user.id, email: user.email, is_buyer: user.is_buyer, is_seller: user.is_seller, is_admin: user.is_admin };
+  }
+
+  // --- 1. ĐĂNG KÝ ---
   async register(dto: RegisterDto) {
     const otpEnabled = process.env.ENABLE_EMAIL_OTP !== 'false';
     const bypassOtpOnError = process.env.BYPASS_EMAIL_OTP_ON_ERROR === 'true';
 
-    // 1. Kiểm tra email đã tồn tại chưa
-    const existingUser = await this.databaseService.user.findUnique({
-      where: { email: dto.email },
-    });
-    
+    const existingUser = await this.databaseService.user.findUnique({ where: { email: dto.email } });
+
     if (existingUser) {
-      // Chỉ chặn khi tài khoản đã xác thực email; cho phép ghi đè nếu còn chưa verified
       if (existingUser.verified_email) {
         throw new BadRequestException('Email này đã được đăng ký và xác thực!');
       }
-
-      // Nếu chưa xác thực, xóa bản ghi cũ để tạo lại và gửi OTP mới
       await this.databaseService.user.delete({ where: { email: dto.email } });
     }
 
-    // 2. Mã hóa mật khẩu
     const salt = await bcrypt.genSalt();
     const hashedPassword = await bcrypt.hash(dto.password, salt);
 
-    // 3. Lưu vào DB (Trạng thái MẶC ĐỊNH là chưa xác thực)
     const newUser = await this.databaseService.user.create({
       data: {
         email: dto.email,
         password_hash: hashedPassword,
         full_name: dto.full_name,
-        role: dto.role,
-        verified_email: !otpEnabled, // Nếu tắt OTP (dev) thì auto verify
+        is_buyer: dto.is_buyer ?? false,
+        is_seller: dto.is_seller ?? false,
+        verified_email: !otpEnabled,
       },
     });
 
-    // 4. Nếu bật OTP: sinh mã + gửi mail, nếu lỗi có thể bypass theo env
     if (otpEnabled) {
       try {
         const verification = await this.verificationService.createVerification(newUser.id);
         const ok = await this.emailService.sendVerificationOTP(newUser.email, verification.code, newUser.full_name);
-        if (!ok) {
-          throw new Error('EmailService returned false');
-        }
+        if (!ok) throw new Error('EmailService returned false');
 
-        return {
-          message: 'Đăng ký thành công bước 1. Vui lòng kiểm tra email để lấy mã OTP.',
-          userId: newUser.id,
-          emailSent: true,
-        };
+        return { message: 'Đăng ký thành công. Vui lòng kiểm tra email để lấy mã OTP.', userId: newUser.id, emailSent: true };
       } catch (err) {
         if (bypassOtpOnError) {
-          // Cho môi trường dev/staging: nếu gửi mail thất bại, tự xác thực để không chặn đăng ký
-          await this.databaseService.user.update({
-            where: { id: newUser.id },
-            data: { verified_email: true },
-          });
-          return {
-            message: 'Email OTP không gửi được (bỏ qua trong môi trường dev). Tài khoản đã được kích hoạt.',
-            userId: newUser.id,
-            emailSent: false,
-            autoVerified: true,
-          };
+          await this.databaseService.user.update({ where: { id: newUser.id }, data: { verified_email: true } });
+          return { message: 'Email OTP không gửi được (bỏ qua dev). Tài khoản đã kích hoạt.', userId: newUser.id, emailSent: false, autoVerified: true };
         }
-        throw new ServiceUnavailableException('Không gửi được email OTP, vui lòng thử lại sau.');
+        throw new ServiceUnavailableException('Không gửi được email OTP, vui lòng thử lại.');
       }
     }
 
-    // Nếu OTP tắt hoàn toàn (dev mode)
-    return {
-      message: 'Đăng ký thành công (DEV: OTP bị tắt, tài khoản đã xác thực).',
-      userId: newUser.id,
-      emailSent: false,
-      autoVerified: true,
-    };
+    return { message: 'Đăng ký thành công (DEV: OTP tắt).', userId: newUser.id, emailSent: false, autoVerified: true };
   }
 
-  // --- 2. XÁC THỰC MÃ OTP ---
+  // --- 2. XÁC THỰC OTP ---
   async verifyEmailOTP(userId: string, code: string) {
-    // Gọi hàm kiểm tra OTP (sẽ throw lỗi nếu sai/hết hạn)
     await this.verificationService.verifyCode(userId, code);
-
-    // Nếu code chạy đến đây tức là OTP đúng -> Kích hoạt tài khoản
-    await this.databaseService.user.update({
-      where: { id: userId },
-      data: { verified_email: true }
-    });
-
+    await this.databaseService.user.update({ where: { id: userId }, data: { verified_email: true } });
     return { message: 'Xác thực tài khoản thành công!' };
   }
 
   // --- 3. ĐĂNG NHẬP ---
   async login(dto: LoginDto) {
-    // 1. Tìm user theo email
-    const user = await this.databaseService.user.findUnique({
-      where: { email: dto.email },
-    });
-    
-    if (!user) {
-      throw new UnauthorizedException('Email hoặc mật khẩu không đúng');
-    }
+    const user = await this.databaseService.user.findUnique({ where: { email: dto.email } });
 
-    // CHẶN ĐĂNG NHẬP NẾU CHƯA XÁC THỰC EMAIL
-    if (!user.verified_email) {
-       throw new UnauthorizedException('Tài khoản chưa được xác thực. Vui lòng kiểm tra email của bạn.');
-    }
+    if (!user) throw new UnauthorizedException('Email hoặc mật khẩu không đúng');
+    if (!user.verified_email) throw new UnauthorizedException('Tài khoản chưa xác thực. Vui lòng kiểm tra email.');
 
-    // 2. Kiểm tra mật khẩu
     const isMatch = await bcrypt.compare(dto.password, user.password_hash);
-    if (!isMatch) {
-      throw new UnauthorizedException('Email hoặc mật khẩu không đúng');
-    }
+    if (!isMatch) throw new UnauthorizedException('Email hoặc mật khẩu không đúng');
 
-    // 3. Tạo Token
-    const payload = { sub: user.id, email: user.email, role: user.role };
-    const access_token = await this.jwtService.signAsync(payload);
-
+    const access_token = await this.jwtService.signAsync(this.buildJwtPayload(user));
     return this.buildAuthResponse(user, access_token);
   }
 
+  // --- 4. ĐĂNG NHẬP / ĐĂNG KÝ QUA FIREBASE (GOOGLE) ---
   async loginWithFirebase(dto: FirebaseLoginDto) {
     this.ensureFirebaseApp();
 
@@ -186,47 +142,45 @@ export class AuthService {
     }
 
     const email = decoded.email?.trim().toLowerCase();
-    if (!email) {
-      throw new UnauthorizedException('Google account không có email hợp lệ.');
-    }
+    if (!email) throw new UnauthorizedException('Google account không có email hợp lệ.');
 
     const firebaseName = decoded.name?.trim();
     const firebasePhoto = decoded.picture?.trim();
 
-    let user = await this.databaseService.user.findUnique({
-      where: { email },
-    });
+    let user = await this.databaseService.user.findUnique({ where: { email } });
 
     if (!user) {
+      // Tạo tài khoản mới với role được chọn
       user = await this.databaseService.user.create({
         data: {
           email,
           password_hash: randomBytes(32).toString('hex'),
           full_name: firebaseName || email.split('@')[0],
-          role: dto.role || 'BUYER',
+          is_buyer: dto.is_buyer ?? true,   // mặc định là buyer nếu không chọn
+          is_seller: dto.is_seller ?? false,
           verified_email: true,
         },
       });
     } else {
+      // User đã tồn tại: merge role (chỉ thêm, không bỏ)
       const shouldUpdateName = firebaseName && (!user.full_name || user.full_name === user.email.split('@')[0]);
-      if (!user.verified_email || shouldUpdateName) {
+      const addBuyer  = dto.is_buyer  && !user.is_buyer;
+      const addSeller = dto.is_seller && !user.is_seller;
+
+      if (!user.verified_email || shouldUpdateName || addBuyer || addSeller) {
         user = await this.databaseService.user.update({
           where: { id: user.id },
           data: {
             verified_email: true,
             ...(shouldUpdateName ? { full_name: firebaseName } : {}),
+            ...(addBuyer  ? { is_buyer: true }  : {}),
+            ...(addSeller ? { is_seller: true } : {}),
           },
         });
       }
     }
 
-    const payload = { sub: user.id, email: user.email, role: user.role };
-    const access_token = await this.jwtService.signAsync(payload);
-
-    return this.buildAuthResponse(
-      user,
-      access_token,
-      firebasePhoto || undefined,
-    );
+    const access_token = await this.jwtService.signAsync(this.buildJwtPayload(user));
+    return this.buildAuthResponse(user, access_token, firebasePhoto || undefined);
   }
 }
