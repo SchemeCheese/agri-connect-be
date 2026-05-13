@@ -1,14 +1,15 @@
-import { IsString, IsBoolean, IsOptional } from 'class-validator';
+import { IsEnum, IsString, IsOptional } from 'class-validator';
+
+export enum GoogleAuthRole {
+  BUYER = 'BUYER',
+  SELLER = 'SELLER',
+}
 
 export class FirebaseLoginDto {
   @IsString()
   idToken: string;
 
   @IsOptional()
-  @IsBoolean()
-  is_buyer?: boolean;
-
-  @IsOptional()
-  @IsBoolean()
-  is_seller?: boolean;
+  @IsEnum(GoogleAuthRole)
+  role?: GoogleAuthRole;
 }

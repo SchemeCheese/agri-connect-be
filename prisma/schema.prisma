@@ -410,3 +410,4 @@ model ProductEmbedding {
 
   @@index([product_id])
 }
+

@@ -8,6 +8,8 @@ import { PassportModule } from '@nestjs/passport';
 // THÊM 2 IMPORT NÀY:
 import { EmailModule } from '../../communication/email/email.module';
 import { VerificationService } from './verification.service';
+import { GoogleAuthController } from './google-auth.controller';
+import { GoogleAuthService } from './google-auth.service';
 
 
 @Module({
@@ -21,7 +23,7 @@ import { VerificationService } from './verification.service';
       signOptions: { expiresIn: '1d' },
     }),
   ],
-  controllers: [AuthController],
-  providers: [AuthService, JwtStrategy, VerificationService], // <- Đã thêm VerificationService vào đây
+  controllers: [AuthController, GoogleAuthController],
+  providers: [AuthService, JwtStrategy, VerificationService, GoogleAuthService], // <- Đã thêm VerificationService vào đây
 })
 export class AuthModule {}
