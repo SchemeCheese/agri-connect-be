@@ -2,10 +2,13 @@ import { Module } from '@nestjs/common';
 import { JwtModule } from '@nestjs/jwt';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { AIAssistantGateway } from './ai-assistant.gateway';
+import { AIAssistantController } from './ai-assistant.controller';
 import { AIAssistantService } from './services/ai-assistant.service';
 import { IntentClassifierService } from './services/intent-classifier.service';
 import { SessionService } from './services/session.service';
 import { RateLimitService } from './services/rate-limit.service';
+import { EmbeddingService } from './services/embedding.service';
+import { SemanticSearchService } from './services/semantic-search.service';
 import { GroqProvider } from './providers/groq.provider';
 import { InputSanitizer } from './security/input-sanitizer';
 import { OutputValidator } from './security/output-validator';
@@ -29,6 +32,7 @@ import { ToolExecutorService } from './tools/tool-executor.service';
       inject: [ConfigService],
     }),
   ],
+  controllers: [AIAssistantController],
   providers: [
     // LLM provider — swap to Claude/OpenAI by replacing GroqProvider
     { provide: LLM_PROVIDER, useClass: GroqProvider },
@@ -42,8 +46,13 @@ import { ToolExecutorService } from './tools/tool-executor.service';
     SessionService,
     IntentClassifierService,
 
-    // Tool layer — individual tools injected into ToolExecutorService
-    ProductSearchTool,
+    // Phase 3: Semantic search pipeline
+    // Dependency order: EmbeddingService → SemanticSearchService → ProductSearchTool
+    EmbeddingService,
+    SemanticSearchService,
+
+    // Phase 2: Tool layer
+    ProductSearchTool,      // now uses SemanticSearchService for hybrid search
     PriceAnalysisTool,
     NegotiationGuideTool,
     SellerRecommendationTool,
@@ -56,6 +65,6 @@ import { ToolExecutorService } from './tools/tool-executor.service';
     // WebSocket gateway
     AIAssistantGateway,
   ],
-  exports: [AIAssistantService, SessionService],
+  exports: [AIAssistantService, SessionService, EmbeddingService, SemanticSearchService],
 })
 export class AIAssistantModule {}

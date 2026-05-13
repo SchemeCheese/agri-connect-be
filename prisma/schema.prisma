@@ -160,6 +160,7 @@ model Product {
   updated_at           DateTime    @updatedAt
   order_items          OrderItem[]
   context_messages     ChatMessage[]
+  embedding            ProductEmbedding?   // Phase 3 — semantic search
 }
 
 model Order {
@@ -394,4 +395,20 @@ model AIMessage {
   created_at   DateTime  @default(now())
 
   @@index([session_id, created_at])
+}
+
+// ─── Phase 3: Semantic Search (pgvector) ────────────────────────────────────
+// Requires: CREATE EXTENSION IF NOT EXISTS vector;  (see prisma/migrations/manual_add_pgvector.sql)
+// Falls back to full-text search gracefully when extension is not available.
+
+model ProductEmbedding {
+  id            String                     @id @default(cuid())
+  product_id    String                     @unique
+  product       Product                    @relation(fields: [product_id], references: [id], onDelete: Cascade)
+  embedding     Unsupported("vector(384)") // 384-dim: paraphrase-multilingual-MiniLM-L12-v2
+  content       String                     @db.Text  // source text that was embedded
+  model_version String                     @default("paraphrase-multilingual-MiniLM-L12-v2")
+  updated_at    DateTime                   @updatedAt
+
+  @@index([product_id])
 }
