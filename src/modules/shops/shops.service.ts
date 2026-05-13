@@ -118,8 +118,8 @@ export class ShopsService {
    * Trả về profile shop, thống kê, và danh sách sản phẩm active
    */
   async getShopById(shopId: string) {
-    const seller = await this.db.user.findUnique({
-      where: { id: shopId, role: 'SELLER' },
+    const seller = await this.db.user.findFirst({
+      where: { id: shopId, is_seller: true },
       select: {
         id: true,
         full_name: true,

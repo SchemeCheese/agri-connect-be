@@ -38,7 +38,7 @@ export class SellerRecommendationTool {
 
       const sellers = await this.db.user.findMany({
         where: {
-          role: 'SELLER',
+          is_seller: true,
           is_active: true,
           ...(input.product_name || input.category
             ? {

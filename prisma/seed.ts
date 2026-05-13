@@ -1,4 +1,4 @@
-import { PrismaClient, UserRole, OrderStatus, TargetType } from '@prisma/client';
+import { PrismaClient, OrderStatus, TargetType } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
 
 const prisma = new PrismaClient();
@@ -167,7 +167,7 @@ async function main() {
       email: 'khach@gmail.com',
       password_hash: passwordHash,
       full_name: 'Khách Hàng',
-      role: UserRole.BUYER,
+      is_buyer: true,
       verified_email: true,
     }
   });
@@ -182,7 +182,7 @@ async function main() {
         email: shop.email,
         password_hash: passwordHash,
         full_name: shop.name,
-        role: UserRole.SELLER,
+        is_seller: true,
         verified_email: true,
         profile: {
           create: {
