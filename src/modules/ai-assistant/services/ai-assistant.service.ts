@@ -158,6 +158,9 @@ export class AIAssistantService {
   ): AsyncGenerator<string> {
     const workingMessages: LLMConversationMessage[] = [...initialMessages];
     const toolsCalled: string[] = [];
+    // Whitelist các entity được phép xuất hiện trong câu trả lời — extract từ tool result
+    const validEntities = new Set<string>();
+    let totalToolItems = 0;
 
     // Tool detection + execution loop (non-streaming)
     for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
@@ -207,25 +210,73 @@ export class AIAssistantService {
           content: JSON.stringify(outcome.result),
         };
         workingMessages.push(toolResultMsg);
+
+        // Extract entity names từ tool output để build whitelist
+        const items = this.extractEntities(outcome.result);
+        for (const name of items) validEntities.add(name);
+        totalToolItems += items.length;
       }
 
       this.logger.log(
-        `Tool round ${round + 1}: called [${outcomes.map((o) => o.toolName).join(', ')}]`,
+        `Tool round ${round + 1}: called [${outcomes.map((o) => o.toolName).join(', ')}], entities=${validEntities.size}`,
       );
     }
 
-    // Grounding reminder ngay trước final synthesis — chống hallucination khi LLM
-    // có xu hướng "embellish" thêm thông tin ngoài tool results.
-    workingMessages.push({
-      role: 'system',
-      content:
-        '[GROUNDING] Chỉ trả lời dựa trên kết quả tool ở trên. ' +
-        'Nếu tool trả mảng rỗng/null/lỗi → bám đúng mẫu "Hệ thống chưa có dữ liệu...". ' +
-        'KHÔNG bịa tên sản phẩm, giá, seller, số liệu không có trong tool result.',
-    });
+    // Grounding reminder — list entity hợp lệ explicit
+    const groundingContent = validEntities.size > 0
+      ? `[GROUNDING — STRICT]
+Chỉ được nhắc đến các tên sau trong câu trả lời (chính xác đến từng ký tự):
+${[...validEntities].map((e) => `- ${e}`).join('\n')}
+
+TUYỆT ĐỐI KHÔNG:
+- Thêm tên cửa hàng/sản phẩm/seller nào KHÔNG có trong danh sách trên
+- Bịa số điện thoại, địa chỉ đường phố, mã bưu chính, fax
+- Thêm thông tin "đánh giá: 4.X/5" nếu tool không trả về stats
+- Suy luận giá từ kiến thức bên ngoài
+
+Nếu user hỏi về thứ KHÔNG có trong danh sách → trả lời:
+"Hệ thống chưa có dữ liệu phù hợp. Bạn có thể thử từ khóa khác hoặc xem trực tiếp tại mục Cửa hàng."`
+      : `[GROUNDING — NO DATA]
+Tool đã chạy nhưng không trả về kết quả nào. PHẢI trả lời ĐÚNG MẪU:
+"Hệ thống chưa có dữ liệu cho yêu cầu này. Bạn có thể thử với từ khóa khác hoặc xem danh sách tại mục Cửa hàng/Sản phẩm."
+
+KHÔNG được:
+- Liệt kê bất kỳ tên cửa hàng nào (vì không có data → 100% bịa)
+- Đề xuất "thường thì có thể là..." / "giá thị trường khoảng..."
+- Dùng kiến thức chung về nông sản`;
+
+    workingMessages.push({ role: 'system', content: groundingContent });
 
     // Final streaming answer: synthesize from all tool results
-    yield* this.streamAndSave(sessionId, workingMessages, model, intent, toolsCalled);
+    yield* this.streamAndSave(sessionId, workingMessages, model, intent, toolsCalled, {
+      validEntities,
+      toolItemCount: totalToolItems,
+    });
+  }
+
+  /**
+   * Extract entity names (store_name, product name, seller name) từ tool result
+   * để build whitelist chống hallucination.
+   */
+  private extractEntities(result: any): string[] {
+    if (!result) return [];
+    const data = result?.data ?? result;
+    const items = Array.isArray(data) ? data : [];
+    const names: string[] = [];
+    for (const item of items) {
+      if (!item || typeof item !== 'object') continue;
+      // SellerScore.store_name | Product.name | misc
+      if (typeof item.store_name === 'string' && item.store_name.trim()) names.push(item.store_name.trim());
+      if (typeof item.name === 'string' && item.name.trim()) names.push(item.name.trim());
+      if (typeof item.full_name === 'string' && item.full_name.trim()) names.push(item.full_name.trim());
+      // top_products lồng trong seller
+      if (Array.isArray(item.top_products)) {
+        for (const p of item.top_products) {
+          if (typeof p?.name === 'string' && p.name.trim()) names.push(p.name.trim());
+        }
+      }
+    }
+    return names;
   }
 
   /**
@@ -238,9 +289,11 @@ export class AIAssistantService {
     model: string,
     intent: IntentLabel,
     toolsCalled: string[] = [],
+    validation?: { validEntities: Set<string>; toolItemCount: number },
   ): AsyncGenerator<string> {
     let fullContent = '';
     const maxTokens = this.config.get<number>('AI_MAX_TOKENS_PER_REQUEST', 800);
+    let streamError: unknown = null;
 
     try {
       // temperature thấp để giảm hallucination — câu trả lời cần bám tool result/context
@@ -248,25 +301,42 @@ export class AIAssistantService {
         fullContent += token;
         yield token;
       }
-    } finally {
-      const validated = this.outputValidator.validate(fullContent);
-
-      const inputTokens = messages.reduce(
-        (sum, m) => sum + Math.ceil((typeof (m as LLMMessage).content === 'string' ? (m as LLMMessage).content.length : 0) / 4),
-        0,
-      );
-      const outputTokens = Math.ceil(fullContent.length / 4);
-
-      await this.sessionService.saveAssistantMessage(sessionId, validated, {
-        intent,
-        tokensUsed: inputTokens + outputTokens,
-        modelUsed: model,
-        toolsCalled,
-      });
-
-      this.rateLimitService.recordTokenUsage(sessionId, inputTokens + outputTokens);
-      await this.maybeSummarize(sessionId, messages.filter((m): m is LLMMessage => m.role !== 'tool'));
+    } catch (err) {
+      streamError = err;
+      this.logger.error(`Stream error: ${(err as Error)?.message}`, (err as Error)?.stack);
     }
+
+    // Validate sau khi stream xong — nếu fail thì cảnh báo + thay nội dung lưu DB
+    const validated = this.outputValidator.validate(fullContent, {
+      validEntities: validation?.validEntities,
+      intent,
+    });
+    if (validated !== fullContent) {
+      const warning = '\n\n---\n⚠️ Thông tin trên có thể không chính xác, hệ thống đã chặn.\n' + validated;
+      for (const chunk of warning.match(/.{1,40}/g) ?? []) {
+        yield chunk;
+      }
+    }
+
+    const finalContent = validated;
+    const inputTokens = messages.reduce(
+      (sum, m) =>
+        sum + Math.ceil((typeof (m as LLMMessage).content === 'string' ? (m as LLMMessage).content.length : 0) / 4),
+      0,
+    );
+    const outputTokens = Math.ceil(finalContent.length / 4);
+
+    await this.sessionService.saveAssistantMessage(sessionId, finalContent, {
+      intent,
+      tokensUsed: inputTokens + outputTokens,
+      modelUsed: model,
+      toolsCalled,
+    });
+
+    this.rateLimitService.recordTokenUsage(sessionId, inputTokens + outputTokens);
+    await this.maybeSummarize(sessionId, messages.filter((m): m is LLMMessage => m.role !== 'tool'));
+
+    if (streamError) throw streamError;
   }
 
   private async maybeSummarize(sessionId: string, plainMessages: LLMMessage[]): Promise<void> {

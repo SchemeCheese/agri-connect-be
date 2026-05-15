@@ -16,10 +16,16 @@ Quy tắc nghiêm ngặt:
 
 Ví dụ:
 "Tìm gạo ST25 dưới 30k/kg" → PRODUCT_SEARCH
+"Có gì bán dâu tây không?" → PRODUCT_SEARCH
+"Tìm rau cải hữu cơ" → PRODUCT_SEARCH
 "Giá cà phê tháng này thế nào?" → PRICE_ANALYSIS
 "Mức giá nào hợp lý để thương lượng 500kg tiêu?" → NEGOTIATION_SUPPORT
 "Shop nào bán rau sạch uy tín?" → SELLER_RECOMMENDATION
+"Có cửa hàng nào bán dâu tây" → SELLER_RECOMMENDATION
+"Cửa hàng nào uy tín nhất" → SELLER_RECOMMENDATION
+"Gợi ý seller bán cam sành" → SELLER_RECOMMENDATION
 "Làm sao để đặt hàng?" → FAQ
+"Phương thức thanh toán nào được hỗ trợ?" → FAQ
 "Python là gì?" → OFF_TOPIC
 "Viết thơ về mùa xuân" → OFF_TOPIC`;
 
