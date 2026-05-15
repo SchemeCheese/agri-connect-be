@@ -47,8 +47,25 @@ const INJECTION_RESPONSE =
 export interface AskResult {
   sessionId: string;
   intent: IntentLabel;
-  stream: AsyncGenerator<string>;
+  stream: AsyncGenerator<string | ToolStatusEvent>;
 }
+
+// Sự kiện trạng thái gửi giữa các token để FE hiển thị "Đang ..." labels.
+// Gateway phân biệt: nếu chunk có shape ToolStatusEvent → emit ai:tool_start, else ai:token.
+export interface ToolStatusEvent {
+  __tool_status__: true;
+  toolName: string;
+  label: string;
+}
+
+const TOOL_STATUS_LABELS: Record<string, string> = {
+  search_products: '🔍 Đang tìm sản phẩm...',
+  get_product_details: '📦 Đang lấy chi tiết sản phẩm...',
+  analyze_price_trends: '📊 Đang phân tích giá...',
+  recommend_sellers: '🏪 Đang tìm cửa hàng phù hợp...',
+  get_negotiation_guidance: '🤝 Đang phân tích chiến lược thương lượng...',
+  get_platform_policy: '📋 Đang tra cứu chính sách...',
+};
 
 @Injectable()
 export class AIAssistantService {
@@ -155,7 +172,7 @@ export class AIAssistantService {
     model: string,
     intent: IntentLabel,
     ctx: ToolExecutionContext,
-  ): AsyncGenerator<string> {
+  ): AsyncGenerator<string | ToolStatusEvent> {
     const workingMessages: LLMConversationMessage[] = [...initialMessages];
     const toolsCalled: string[] = [];
     // Whitelist các entity được phép xuất hiện trong câu trả lời — extract từ tool result
@@ -163,11 +180,13 @@ export class AIAssistantService {
     let totalToolItems = 0;
 
     // Tool detection + execution loop (non-streaming)
+    // Luôn dùng FAST_MODEL cho tool detection — chỉ cần nhận diện tool/argument,
+    // không cần reasoning sâu. Tiết kiệm 500-1500ms/round so với 70b.
     for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
       let toolResponse: Awaited<ReturnType<ILLMProvider['completeWithTools']>>;
       try {
         toolResponse = await this.llm.completeWithTools({
-          model,
+          model: FAST_MODEL,
           messages: workingMessages,
           tools: AGRI_TOOLS,
           maxTokens: 256,
@@ -198,6 +217,14 @@ export class AIAssistantService {
         tool_calls: allowedCalls,
       };
       workingMessages.push(assistantToolMsg);
+
+      // Yield status events TRƯỚC khi execute để FE hiển thị "Đang tìm sản phẩm..."
+      // Đây là chunk đặc biệt (không phải text token).
+      for (const tc of allowedCalls) {
+        const toolName = tc.function.name;
+        const label = TOOL_STATUS_LABELS[toolName] ?? `⏳ Đang xử lý: ${toolName}`;
+        yield { __tool_status__: true, toolName, label } as ToolStatusEvent;
+      }
 
       // Execute tools in parallel
       const outcomes = await this.toolExecutor.executeAll(allowedCalls, ctx);

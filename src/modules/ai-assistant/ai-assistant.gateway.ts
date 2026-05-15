@@ -127,15 +127,24 @@ export class AIAssistantGateway implements OnGatewayConnection, OnGatewayDisconn
     try {
       const result = await this.aiService.ask(userId, data);
 
-      // Stream tokens to client
+      // Stream tokens to client — phân biệt text chunk vs tool status event
       let tokenCount = 0;
-      for await (const token of result.stream) {
-        if (!client.connected) break; // Client disconnected — stop streaming
-        client.emit('ai:token', {
-          chunk: token,
-          sessionId: result.sessionId,
-        });
-        tokenCount++;
+      for await (const chunk of result.stream) {
+        if (!client.connected) break;
+        if (typeof chunk === 'object' && chunk !== null && (chunk as any).__tool_status__) {
+          const status = chunk as { toolName: string; label: string };
+          client.emit('ai:tool_start', {
+            sessionId: result.sessionId,
+            toolName: status.toolName,
+            label: status.label,
+          });
+        } else {
+          client.emit('ai:token', {
+            chunk,
+            sessionId: result.sessionId,
+          });
+          tokenCount++;
+        }
       }
 
       this.logger.log(`[AI-CHAT] ai:complete user=${userId} session=${result.sessionId} tokens=${tokenCount}`);

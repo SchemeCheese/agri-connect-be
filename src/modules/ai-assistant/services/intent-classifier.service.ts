@@ -11,6 +11,26 @@ import { InputSanitizer } from '../security/input-sanitizer';
 // Fast model — cheap, deterministic classification
 const CLASSIFIER_MODEL = 'llama-3.1-8b-instant';
 
+// Keyword regex fast-path — bắt ~50-60% câu hỏi mà không cần gọi LLM (tiết kiệm 500-800ms)
+const FAST_PATH_PATTERNS: Array<{ pattern: RegExp; label: IntentLabel }> = [
+  // SELLER_RECOMMENDATION
+  { pattern: /\b(shop|cửa\s*hàng|seller|nhà\s*bán|người\s*bán)\b.*\b(nào|gì|uy\s*tín|tốt|nên|đề\s*xuất|gợi\s*ý|đáng\s*tin)\b/i, label: 'SELLER_RECOMMENDATION' },
+  { pattern: /(gợi\s*ý|tìm|tìm\s*giúp|cho\s*tôi)\s+(shop|cửa\s*hàng|seller|nhà\s*bán)\b/i, label: 'SELLER_RECOMMENDATION' },
+
+  // PRICE_ANALYSIS
+  { pattern: /\b(giá|xu\s*hướng\s*giá|so\s*sánh\s*giá|biến\s*động\s*giá|giá\s*thị\s*trường|giá\s*trung\s*bình)\b/i, label: 'PRICE_ANALYSIS' },
+
+  // NEGOTIATION_SUPPORT
+  { pattern: /\b(thương\s*lượng|đàm\s*phán|trả\s*giá|mặc\s*cả|giá\s*hợp\s*lý.*\d+\s*(kg|tấn))\b/i, label: 'NEGOTIATION_SUPPORT' },
+
+  // PRODUCT_SEARCH
+  { pattern: /\b(tìm|kiếm|có\s*bán|còn|đang\s*bán|mua)\b.*\b(gạo|rau|trái\s*cây|hoa\s*quả|nông\s*sản|sản\s*phẩm|cà\s*phê|dâu|cam|xoài|chuối|nhãn|vải|tiêu|điều)\b/i, label: 'PRODUCT_SEARCH' },
+  { pattern: /\b(gạo|cà\s*phê|tiêu|điều|hạt|rau\s*sạch|trái\s*cây)\b.*\b(dưới|trên|khoảng|chỉ|bao\s*nhiêu|giá)\b/i, label: 'PRICE_ANALYSIS' },
+
+  // FAQ
+  { pattern: /\b(đặt\s*hàng|thanh\s*toán|vận\s*chuyển|hoàn\s*tiền|chính\s*sách|quy\s*trình|làm\s*sao|làm\s*thế\s*nào|cách\s*thức)\b/i, label: 'FAQ' },
+];
+
 @Injectable()
 export class IntentClassifierService {
   private readonly logger = new Logger(IntentClassifierService.name);
@@ -25,6 +45,14 @@ export class IntentClassifierService {
     if (this.sanitizer.isObviouslyOffTopic(userMessage)) {
       this.logger.debug(`[Keyword block] "${userMessage.substring(0, 60)}"`);
       return 'OFF_TOPIC';
+    }
+
+    // Layer 1.5: regex fast-path — tiết kiệm 500-800ms cho câu hỏi rõ ý định
+    for (const { pattern, label } of FAST_PATH_PATTERNS) {
+      if (pattern.test(userMessage)) {
+        this.logger.debug(`[Fast-path] "${userMessage.substring(0, 60)}" → ${label}`);
+        return label;
+      }
     }
 
     // Layer 2: LLM classifier with small fast model

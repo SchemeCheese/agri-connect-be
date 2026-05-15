@@ -160,6 +160,10 @@ model Product {
   order_items          OrderItem[]
   context_messages     ChatMessage[]
   embedding            ProductEmbedding?   // Phase 3 — semantic search
+
+  // Index hỗ trợ AI tools (search_products, recommend_sellers) — ILIKE/contains trên name
+  @@index([is_active, name])
+  @@index([is_active, category_id])
 }
 
 model Order {
