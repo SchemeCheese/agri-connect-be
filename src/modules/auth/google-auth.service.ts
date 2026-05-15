@@ -152,7 +152,8 @@ export class GoogleAuthService {
       user.is_seller ? GoogleAuthRole.SELLER : null,
     ].filter(Boolean);
     if (roles.length > 1) {
-      throw new HttpException({ message: 'Cần chọn vai trò để đăng nhập', roles }, HttpStatus.MULTIPLE_CHOICES);
+      // HTTP 300 Multiple Choices — Nest HttpStatus enum không có hằng này, dùng số trực tiếp
+      throw new HttpException({ message: 'Cần chọn vai trò để đăng nhập', roles }, 300);
     }
 
     const access_token = await this.jwtService.signAsync(this.buildJwtPayload(user));

@@ -149,6 +149,10 @@ export class AuthService {
 
     let user = await this.databaseService.user.findUnique({ where: { email } });
 
+    // DTO chỉ có `role` ('BUYER' | 'SELLER'). Derive boolean cờ tương ứng.
+    const wantBuyer  = dto.role === undefined ? true  : dto.role === 'BUYER';
+    const wantSeller = dto.role === undefined ? false : dto.role === 'SELLER';
+
     if (!user) {
       // Tạo tài khoản mới với role được chọn
       user = await this.databaseService.user.create({
@@ -156,16 +160,16 @@ export class AuthService {
           email,
           password_hash: randomBytes(32).toString('hex'),
           full_name: firebaseName || email.split('@')[0],
-          is_buyer: dto.is_buyer ?? true,   // mặc định là buyer nếu không chọn
-          is_seller: dto.is_seller ?? false,
+          is_buyer: wantBuyer,   // mặc định là buyer nếu không chọn
+          is_seller: wantSeller,
           verified_email: true,
         },
       });
     } else {
       // User đã tồn tại: merge role (chỉ thêm, không bỏ)
       const shouldUpdateName = firebaseName && (!user.full_name || user.full_name === user.email.split('@')[0]);
-      const addBuyer  = dto.is_buyer  && !user.is_buyer;
-      const addSeller = dto.is_seller && !user.is_seller;
+      const addBuyer  = wantBuyer  && !user.is_buyer;
+      const addSeller = wantSeller && !user.is_seller;
 
       if (!user.verified_email || shouldUpdateName || addBuyer || addSeller) {
         user = await this.databaseService.user.update({
