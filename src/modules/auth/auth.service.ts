@@ -1,4 +1,4 @@
-import { Injectable, BadRequestException, UnauthorizedException, ServiceUnavailableException } from '@nestjs/common';
+import { Injectable, BadRequestException, UnauthorizedException, ServiceUnavailableException, Logger } from '@nestjs/common';
 import { DatabaseService } from '../../database/database.service';
 import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcrypt';
@@ -13,6 +13,8 @@ import { VerificationService } from './verification.service';
 
 @Injectable()
 export class AuthService {
+  private readonly logger = new Logger(AuthService.name);
+
   constructor(
     private readonly databaseService: DatabaseService,
     private readonly jwtService: JwtService,
@@ -64,8 +66,21 @@ export class AuthService {
 
   // --- 1. ĐĂNG KÝ ---
   async register(dto: RegisterDto) {
-    const otpEnabled = process.env.ENABLE_EMAIL_OTP !== 'false';
-    const bypassOtpOnError = process.env.BYPASS_EMAIL_OTP_ON_ERROR === 'true';
+    // OTP enabled chỉ khi: ENABLE_EMAIL_OTP=true VÀ có đủ MAIL_* env vars
+    // Tránh case dev set ENABLE_EMAIL_OTP=true nhưng quên MAIL_USER/MAIL_PASS → 503
+    const otpFlag = process.env.ENABLE_EMAIL_OTP !== 'false';
+    const mailConfigured = !!(process.env.MAIL_HOST && process.env.MAIL_USER && process.env.MAIL_PASS);
+    const otpEnabled = otpFlag && mailConfigured;
+    const bypassOtpOnError = process.env.BYPASS_EMAIL_OTP_ON_ERROR !== 'false'; // default ON
+
+    if (otpFlag && !mailConfigured) {
+      this.logger.warn('ENABLE_EMAIL_OTP=true nhưng MAIL_* chưa cấu hình → tự động bỏ qua OTP');
+    }
+
+    // Map field `role` (string alias) → boolean flags. Hỗ trợ cả 2 cách truyền DTO.
+    const wantBuyer = dto.is_buyer ?? (dto.role ? dto.role === 'BUYER' : true);
+    const wantSeller = dto.is_seller ?? (dto.role === 'SELLER');
+    const finalBuyer = wantBuyer || !wantSeller; // luôn có ít nhất 1 role
 
     const existingUser = await this.databaseService.user.findUnique({ where: { email: dto.email } });
 
@@ -79,12 +94,6 @@ export class AuthService {
     const salt = await bcrypt.genSalt();
     const hashedPassword = await bcrypt.hash(dto.password, salt);
 
-    // Mọi tài khoản mới mặc định là BUYER. SELLER chỉ được kích hoạt qua flow
-    // "Đăng ký bán hàng" (POST /auth/become-seller) sau khi user đã đăng nhập.
-    const wantBuyer = dto.is_buyer ?? true;
-    const wantSeller = dto.is_seller ?? false;
-    const finalBuyer = wantBuyer || !wantSeller; // chống edge case cả 2 đều false
-
     const newUser = await this.databaseService.user.create({
       data: {
         email: dto.email,
@@ -96,6 +105,8 @@ export class AuthService {
       },
     });
 
+    this.logger.log(`[REGISTER] ${newUser.email} buyer=${finalBuyer} seller=${wantSeller} otp=${otpEnabled}`);
+
     if (otpEnabled) {
       try {
         const verification = await this.verificationService.createVerification(newUser.id);
@@ -104,11 +115,18 @@ export class AuthService {
 
         return { message: 'Đăng ký thành công. Vui lòng kiểm tra email để lấy mã OTP.', userId: newUser.id, emailSent: true };
       } catch (err) {
+        this.logger.error(`[REGISTER] OTP send failed for ${newUser.email}: ${(err as Error)?.message}`);
         if (bypassOtpOnError) {
           await this.databaseService.user.update({ where: { id: newUser.id }, data: { verified_email: true } });
-          return { message: 'Email OTP không gửi được (bỏ qua dev). Tài khoản đã kích hoạt.', userId: newUser.id, emailSent: false, autoVerified: true };
+          return {
+            message: 'Đăng ký thành công. (OTP tạm bỏ qua do lỗi hạ tầng email)',
+            userId: newUser.id,
+            emailSent: false,
+            autoVerified: true,
+          };
         }
-        throw new ServiceUnavailableException('Không gửi được email OTP, vui lòng thử lại.');
+        // Không bypass → giữ user nhưng báo 503 để FE chỉ dẫn rõ
+        throw new ServiceUnavailableException('Không gửi được email OTP. Vui lòng liên hệ admin hoặc thử lại sau.');
       }
     }
 
