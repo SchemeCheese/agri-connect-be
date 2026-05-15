@@ -214,6 +214,16 @@ export class AIAssistantService {
       );
     }
 
+    // Grounding reminder ngay trước final synthesis — chống hallucination khi LLM
+    // có xu hướng "embellish" thêm thông tin ngoài tool results.
+    workingMessages.push({
+      role: 'system',
+      content:
+        '[GROUNDING] Chỉ trả lời dựa trên kết quả tool ở trên. ' +
+        'Nếu tool trả mảng rỗng/null/lỗi → bám đúng mẫu "Hệ thống chưa có dữ liệu...". ' +
+        'KHÔNG bịa tên sản phẩm, giá, seller, số liệu không có trong tool result.',
+    });
+
     // Final streaming answer: synthesize from all tool results
     yield* this.streamAndSave(sessionId, workingMessages, model, intent, toolsCalled);
   }
@@ -233,7 +243,8 @@ export class AIAssistantService {
     const maxTokens = this.config.get<number>('AI_MAX_TOKENS_PER_REQUEST', 800);
 
     try {
-      for await (const token of this.llm.stream({ model, messages, maxTokens, temperature: 0.7 })) {
+      // temperature thấp để giảm hallucination — câu trả lời cần bám tool result/context
+      for await (const token of this.llm.stream({ model, messages, maxTokens, temperature: 0.3 })) {
         fullContent += token;
         yield token;
       }
