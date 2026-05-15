@@ -79,13 +79,19 @@ export class AuthService {
     const salt = await bcrypt.genSalt();
     const hashedPassword = await bcrypt.hash(dto.password, salt);
 
+    // Mọi tài khoản mới mặc định là BUYER. SELLER chỉ được kích hoạt qua flow
+    // "Đăng ký bán hàng" (POST /auth/become-seller) sau khi user đã đăng nhập.
+    const wantBuyer = dto.is_buyer ?? true;
+    const wantSeller = dto.is_seller ?? false;
+    const finalBuyer = wantBuyer || !wantSeller; // chống edge case cả 2 đều false
+
     const newUser = await this.databaseService.user.create({
       data: {
         email: dto.email,
         password_hash: hashedPassword,
         full_name: dto.full_name,
-        is_buyer: dto.is_buyer ?? false,
-        is_seller: dto.is_seller ?? false,
+        is_buyer: finalBuyer,
+        is_seller: wantSeller,
         verified_email: !otpEnabled,
       },
     });
@@ -125,6 +131,25 @@ export class AuthService {
 
     const isMatch = await bcrypt.compare(dto.password, user.password_hash);
     if (!isMatch) throw new UnauthorizedException('Email hoặc mật khẩu không đúng');
+
+    const access_token = await this.jwtService.signAsync(this.buildJwtPayload(user));
+    return this.buildAuthResponse(user, access_token);
+  }
+
+  // --- 3.5. NÂNG CẤP THÀNH SELLER ---
+  // Idempotent: gọi nhiều lần OK. Sau khi mutate, sign JWT mới với is_seller=true
+  // để FE thay token cũ (token cũ vẫn có thể tiếp tục dùng nhưng thiếu cờ seller).
+  async becomeSeller(userId: string) {
+    const user = await this.databaseService.user.findUnique({ where: { id: userId } });
+    if (!user) throw new UnauthorizedException('Tài khoản không tồn tại.');
+
+    if (!user.is_seller) {
+      await this.databaseService.user.update({
+        where: { id: userId },
+        data: { is_seller: true },
+      });
+      user.is_seller = true;
+    }
 
     const access_token = await this.jwtService.signAsync(this.buildJwtPayload(user));
     return this.buildAuthResponse(user, access_token);
