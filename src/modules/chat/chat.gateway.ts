@@ -54,14 +54,38 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       client.data.userId = payload.sub;
       client.data.userRole = { is_buyer: payload.is_buyer, is_seller: payload.is_seller };
       client.data.userName = payload.email;
+      // Cache conversation đã verify membership trong vòng đời socket
+      client.data.memberOf = new Set<string>();
 
       this.connectedUsers.set(payload.sub, client.id);
+      // Personal room cho mỗi user — server emit unreadUpdated tới `user:${id}` không phụ thuộc conversation
+      await client.join(`user:${payload.sub}`);
       this.logger.log(`✅ [CONNECT] User ${payload.sub} (${client.id})`);
     } catch (err) {
       this.logger.warn(`❌ [CONNECT FAILED] ${client.id} — ${err.message}`);
       client.emit('error', { message: 'Xác thực thất bại. Vui lòng đăng nhập lại.' });
       client.disconnect();
     }
+  }
+
+  // ─── Helper: assert + cache membership trên socket ───────────────────────
+  private async ensureMember(client: Socket, conversationId: string) {
+    const userId = client.data?.userId;
+    if (!userId) throw new WsException('Chưa xác thực.');
+    if (!conversationId) throw new WsException('Thiếu conversationId.');
+
+    const cache: Set<string> = client.data.memberOf ?? new Set<string>();
+    if (cache.has(conversationId)) return userId;
+
+    try {
+      await this.chatService.assertMembership(conversationId, userId);
+    } catch (err: any) {
+      // Chuẩn hóa lỗi NestHttpException -> WsException
+      throw new WsException(err?.message || 'Không có quyền truy cập cuộc trò chuyện.');
+    }
+    cache.add(conversationId);
+    client.data.memberOf = cache;
+    return userId;
   }
 
   // ─── Khi client ngắt kết nối ────────────────────────────────────────────
@@ -80,24 +104,53 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     @ConnectedSocket() client: Socket,
     @MessageBody() data: { conversationId: string },
   ) {
-    const userId = client.data?.userId;
-    if (!userId) throw new WsException('Chưa xác thực.');
+    const userId = await this.ensureMember(client, data?.conversationId);
 
     await client.join(data.conversationId);
     this.logger.log(`📥 User ${userId} joined room ${data.conversationId}`);
 
+    // Khi user join room → coi như đã đọc tất cả tin nhắn cũ trong room
+    try {
+      await this.chatService.markAsRead(data.conversationId, userId);
+      const total = await this.chatService.getUnreadTotal(userId);
+      this.server.to(`user:${userId}`).emit('unreadUpdated', {
+        conversationId: data.conversationId,
+        unread: 0,
+        totalUnread: total,
+      });
+    } catch (err) {
+      this.logger.warn(`[joinRoom] markAsRead failed: ${(err as any)?.message}`);
+    }
+
     return { event: 'joinedRoom', data: { conversationId: data.conversationId } };
   }
+
+  // Helper: emit unreadUpdated cho 1 user (sau khi recipient nhận tin nhắn mới)
+  private async emitUnreadFor(conversationId: string, userId: string) {
+    try {
+      const [unread, total] = await Promise.all([
+        this.chatService.getUnreadCount(conversationId, userId),
+        this.chatService.getUnreadTotal(userId),
+      ]);
+      this.server.to(`user:${userId}`).emit('unreadUpdated', {
+        conversationId,
+        unread,
+        totalUnread: total,
+      });
+    } catch (err) {
+      this.logger.warn(`[emitUnreadFor] ${(err as any)?.message}`);
+    }
+  }
+
 
   // ─── Event: sendMessage — gửi tin nhắn ───────────────────────────────────
   // FE gọi: socket.emit('sendMessage', { conversationId, content })
   @SubscribeMessage('sendMessage')
   async handleSendMessage(
     @ConnectedSocket() client: Socket,
-    @MessageBody() data: { conversationId: string; content: string },
+    @MessageBody() data: { conversationId: string; content: string; clientMessageId?: string },
   ) {
-    const userId = client.data?.userId;
-    if (!userId) throw new WsException('Chưa xác thực.');
+    const userId = await this.ensureMember(client, data?.conversationId);
 
     if (!data.content?.trim()) {
       throw new WsException('Nội dung tin nhắn không được rỗng.');
@@ -107,10 +160,12 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       data.conversationId,
       userId,
       data.content.trim(),
+      data.clientMessageId,
     );
 
     // Phát tin nhắn đến tất cả client trong phòng (bao gồm người gửi)
     // Shape phải khớp với getMessages response — FE dùng chung model
+    // client_message_id cho phép FE map echo với optimistic UI và bỏ tin gửi trùng
     this.server.to(data.conversationId).emit('newMessage', {
       id: message.id,
       conversationId: data.conversationId,
@@ -121,10 +176,64 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       proposed_quantity: null,
       proposed_price: null,
       quote: null,
+      client_message_id: (message as any).client_message_id ?? data.clientMessageId ?? null,
       created_at: message.created_at,
     });
 
-    return { event: 'messageSent', data: { id: message.id } };
+    // Tăng unread cho recipient (ngay cả khi họ đang offline — emit dù sao vẫn không sao)
+    const recipientId = await this.chatService.getOtherParticipant(data.conversationId, userId);
+    if (recipientId) void this.emitUnreadFor(data.conversationId, recipientId);
+
+    return { event: 'messageSent', data: { id: message.id, clientMessageId: data.clientMessageId } };
+  }
+
+  // ─── Event: sendImageMessage — gửi tin nhắn ảnh ──────────────────────────
+  // Flow: FE gọi POST /chat/upload-image trước → nhận imageUrl → emit event này
+  // FE gọi: socket.emit('sendImageMessage', { conversationId, imageUrl, caption?, clientMessageId? })
+  @SubscribeMessage('sendImageMessage')
+  async handleSendImageMessage(
+    @ConnectedSocket() client: Socket,
+    @MessageBody()
+    data: {
+      conversationId: string;
+      imageUrl: string;
+      caption?: string;
+      clientMessageId?: string;
+    },
+  ) {
+    const userId = await this.ensureMember(client, data?.conversationId);
+
+    if (!data?.imageUrl) {
+      throw new WsException('Thiếu imageUrl.');
+    }
+
+    const message = await this.chatService.saveImageMessage(
+      data.conversationId,
+      userId,
+      data.imageUrl,
+      data.caption,
+      data.clientMessageId,
+    );
+
+    this.server.to(data.conversationId).emit('newMessage', {
+      id: message.id,
+      conversationId: data.conversationId,
+      sender: message.sender,
+      message_content: message.message_content,
+      message_type: message.message_type,
+      image_url: (message as any).image_url ?? data.imageUrl,
+      context_product: null,
+      proposed_quantity: null,
+      proposed_price: null,
+      quote: null,
+      client_message_id: (message as any).client_message_id ?? data.clientMessageId ?? null,
+      created_at: message.created_at,
+    });
+
+    const recipientIdForImg = await this.chatService.getOtherParticipant(data.conversationId, userId);
+    if (recipientIdForImg) void this.emitUnreadFor(data.conversationId, recipientIdForImg);
+
+    return { event: 'imageSent', data: { id: message.id, clientMessageId: data.clientMessageId } };
   }
 
   // ─── Event: startConversation — join room sau khi FE đã có conversationId ─
@@ -216,8 +325,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       unit: string;
     },
   ) {
-    const userId = client.data?.userId;
-    if (!userId) throw new WsException('Chưa xác thực.');
+    const userId = await this.ensureMember(client, data?.conversationId);
 
     const message = await this.negotiationService.sendQuote(userId, data);
 
@@ -252,8 +360,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     @ConnectedSocket() client: Socket,
     @MessageBody() data: { messageId: string; action: 'ACCEPTED' | 'REJECTED'; conversationId: string },
   ) {
-    const userId = client.data?.userId;
-    if (!userId) throw new WsException('Chưa xác thực.');
+    const userId = await this.ensureMember(client, data?.conversationId);
 
     const result = await this.negotiationService.respondToQuote(userId, data.messageId, data.action);
 
@@ -278,8 +385,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     @ConnectedSocket() client: Socket,
     @MessageBody() data: { conversationId: string },
   ) {
-    const userId = client.data?.userId;
-    if (!userId) throw new WsException('Chưa xác thực.');
+    const userId = await this.ensureMember(client, data?.conversationId);
 
     const message = await this.negotiationService.cancelNegotiation(userId, data.conversationId);
 

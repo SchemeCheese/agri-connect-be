@@ -18,7 +18,7 @@ import { EmbeddingService } from './services/embedding.service';
 import { SemanticSearchService } from './services/semantic-search.service';
 
 interface AuthenticatedRequest {
-  user: { userId: string; role: string };
+  user: { sub: string; email?: string; is_buyer?: boolean; is_seller?: boolean; is_admin?: boolean };
 }
 
 @Controller('ai')
@@ -33,7 +33,7 @@ export class AIAssistantController {
   /** List the current user's AI sessions. */
   @Get('sessions')
   async getSessions(@Request() req: AuthenticatedRequest) {
-    return this.sessionService.getUserSessions(req.user.userId);
+    return this.sessionService.getUserSessions(req.user.sub);
   }
 
   /** Get a specific session with its full message history. */
@@ -42,7 +42,7 @@ export class AIAssistantController {
     @Request() req: AuthenticatedRequest,
     @Param('id') sessionId: string,
   ) {
-    return this.sessionService.getSessionForUser(sessionId, req.user.userId);
+    return this.sessionService.getSessionForUser(sessionId, req.user.sub);
   }
 
   /**

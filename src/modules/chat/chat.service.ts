@@ -26,6 +26,92 @@ export class ChatService {
     });
   }
 
+  // ─── Đánh dấu đã đọc + trả về unread sau khi mark ─────────────────────────
+  // Idempotent: gọi nhiều lần cũng OK.
+  async markAsRead(conversationId: string, userId: string) {
+    const conv = await this.assertMembership(conversationId, userId);
+    const now = new Date();
+    const isUser1 = conv.user1_id === userId;
+    await this.db.conversation.update({
+      where: { id: conversationId },
+      data: isUser1 ? { user1_last_read_at: now } : { user2_last_read_at: now },
+    });
+    return { conversationId, unread: 0, lastReadAt: now };
+  }
+
+  // ─── Tính unread cho 1 conversation ───────────────────────────────────────
+  async getUnreadCount(conversationId: string, userId: string): Promise<number> {
+    const conv = await this.db.conversation.findUnique({
+      where: { id: conversationId },
+      select: { user1_id: true, user2_id: true, user1_last_read_at: true, user2_last_read_at: true },
+    });
+    if (!conv) return 0;
+    if (conv.user1_id !== userId && conv.user2_id !== userId) return 0;
+
+    const lastRead = conv.user1_id === userId ? conv.user1_last_read_at : conv.user2_last_read_at;
+
+    return this.db.chatMessage.count({
+      where: {
+        conversation_id: conversationId,
+        sender_id: { not: userId }, // không đếm tin nhắn của chính mình
+        ...(lastRead ? { created_at: { gt: lastRead } } : {}),
+      },
+    });
+  }
+
+  // ─── Tổng unread của 1 user (cho app icon badge) ──────────────────────────
+  async getUnreadTotal(userId: string): Promise<number> {
+    const convs = await this.db.conversation.findMany({
+      where: { OR: [{ user1_id: userId }, { user2_id: userId }] },
+      select: { id: true, user1_id: true, user2_id: true, user1_last_read_at: true, user2_last_read_at: true },
+    });
+    if (convs.length === 0) return 0;
+
+    // Gom thành 1 query duy nhất bằng raw SQL để tránh N+1
+    const parts: string[] = [];
+    const values: any[] = [];
+    let i = 1;
+    for (const c of convs) {
+      const lastRead = c.user1_id === userId ? c.user1_last_read_at : c.user2_last_read_at;
+      if (lastRead) {
+        parts.push(`(conversation_id = $${i++} AND sender_id <> $${i++} AND created_at > $${i++})`);
+        values.push(c.id, userId, lastRead);
+      } else {
+        parts.push(`(conversation_id = $${i++} AND sender_id <> $${i++})`);
+        values.push(c.id, userId);
+      }
+    }
+    const sql = `SELECT COUNT(*)::int AS count FROM "ChatMessage" WHERE ${parts.join(' OR ')}`;
+    const rows = await this.db.$queryRawUnsafe<{ count: number }[]>(sql, ...values);
+    return rows[0]?.count ?? 0;
+  }
+
+  // ─── Trả về userId của đối phương trong conversation ──────────────────────
+  async getOtherParticipant(conversationId: string, userId: string): Promise<string | null> {
+    const conv = await this.db.conversation.findUnique({
+      where: { id: conversationId },
+      select: { user1_id: true, user2_id: true },
+    });
+    if (!conv) return null;
+    if (conv.user1_id === userId) return conv.user2_id;
+    if (conv.user2_id === userId) return conv.user1_id;
+    return null;
+  }
+
+  // ─── Bảo đảm user thuộc conversation (dùng ở gateway TRƯỚC khi xử lý event) ──
+  // Trả về conversation nếu hợp lệ, throw ForbiddenException nếu không.
+  async assertMembership(conversationId: string, userId: string) {
+    const conv = await this.db.conversation.findUnique({
+      where: { id: conversationId },
+      select: { id: true, user1_id: true, user2_id: true },
+    });
+    if (!conv) throw new NotFoundException('Cuộc trò chuyện không tồn tại.');
+    if (conv.user1_id !== userId && conv.user2_id !== userId) {
+      throw new ForbiddenException('Bạn không thuộc cuộc trò chuyện này.');
+    }
+    return conv;
+  }
+
   // ─── Tìm conversation theo cặp partner (dùng cho FE check trước khi navigate) ──
   async findConversationByPartner(userId: string, partnerId: string) {
     const [user1Id, user2Id] = [userId, partnerId].sort();
@@ -109,36 +195,151 @@ export class ChatService {
     return { conversationId: conv.id, partner, product: productContext };
   }
 
-  // ─── Lưu tin nhắn TEXT vào DB ─────────────────────────────────────────────
-  async saveMessage(conversationId: string, senderId: string, content: string) {
+  // ─── Lưu tin nhắn TEXT vào DB (idempotent theo client_message_id) ─────────
+  async saveMessage(
+    conversationId: string,
+    senderId: string,
+    content: string,
+    clientMessageId?: string,
+  ) {
     const conv = await this.db.conversation.findUnique({ where: { id: conversationId } });
     if (!conv) throw new NotFoundException('Cuộc trò chuyện không tồn tại.');
     if (conv.user1_id !== senderId && conv.user2_id !== senderId) {
       throw new ForbiddenException('Bạn không thuộc cuộc trò chuyện này.');
     }
 
-    return this.db.chatMessage.create({
-      data: {
-        conversation_id: conversationId,
-        sender_id: senderId,
-        message_content: content,
-        message_type: MessageType.TEXT,
-      },
-      include: { sender: { select: { id: true, full_name: true } } },
-    });
+    // Nếu FE gửi kèm clientMessageId → kiểm tra đã lưu chưa để chống duplicate khi retry
+    if (clientMessageId) {
+      const existing = await this.db.chatMessage.findUnique({
+        where: {
+          sender_id_client_message_id: {
+            sender_id: senderId,
+            client_message_id: clientMessageId,
+          },
+        },
+        include: { sender: { select: { id: true, full_name: true } } },
+      });
+      if (existing) return existing;
+    }
+
+    try {
+      return await this.db.chatMessage.create({
+        data: {
+          conversation_id: conversationId,
+          sender_id: senderId,
+          message_content: content,
+          message_type: MessageType.TEXT,
+          client_message_id: clientMessageId ?? null,
+        },
+        include: { sender: { select: { id: true, full_name: true } } },
+      });
+    } catch (err: any) {
+      // Race condition: 2 request gần như đồng thời cùng clientMessageId → P2002 unique
+      // Khi đó row đã được insert bởi request kia → trả về row đó
+      if (err?.code === 'P2002' && clientMessageId) {
+        const existing = await this.db.chatMessage.findUnique({
+          where: {
+            sender_id_client_message_id: {
+              sender_id: senderId,
+              client_message_id: clientMessageId,
+            },
+          },
+          include: { sender: { select: { id: true, full_name: true } } },
+        });
+        if (existing) return existing;
+      }
+      throw err;
+    }
   }
 
-  // ─── Lấy lịch sử tin nhắn ────────────────────────────────────────────────
-  async getMessages(conversationId: string, requesterId: string) {
+  // ─── Lưu tin nhắn ảnh (idempotent theo client_message_id) ─────────────────
+  // imageUrl phải là path do POST /chat/upload-image trả về.
+  async saveImageMessage(
+    conversationId: string,
+    senderId: string,
+    imageUrl: string,
+    caption?: string,
+    clientMessageId?: string,
+  ) {
+    const conv = await this.db.conversation.findUnique({ where: { id: conversationId } });
+    if (!conv) throw new NotFoundException('Cuộc trò chuyện không tồn tại.');
+    if (conv.user1_id !== senderId && conv.user2_id !== senderId) {
+      throw new ForbiddenException('Bạn không thuộc cuộc trò chuyện này.');
+    }
+    if (!imageUrl?.trim()) {
+      throw new BadRequestException('Thiếu imageUrl.');
+    }
+    // Chỉ chấp nhận URL nội bộ /uploads/chat/* để chống abuse (avatar, ảnh ngoài...)
+    if (!imageUrl.startsWith('/uploads/chat/')) {
+      throw new BadRequestException('imageUrl không hợp lệ.');
+    }
+
+    if (clientMessageId) {
+      const existing = await this.db.chatMessage.findUnique({
+        where: {
+          sender_id_client_message_id: {
+            sender_id: senderId,
+            client_message_id: clientMessageId,
+          },
+        },
+        include: { sender: { select: { id: true, full_name: true } } },
+      });
+      if (existing) return existing;
+    }
+
+    try {
+      return await this.db.chatMessage.create({
+        data: {
+          conversation_id: conversationId,
+          sender_id: senderId,
+          message_content: caption?.trim() || '',
+          message_type: MessageType.IMAGE,
+          image_url: imageUrl,
+          client_message_id: clientMessageId ?? null,
+        },
+        include: { sender: { select: { id: true, full_name: true } } },
+      });
+    } catch (err: any) {
+      if (err?.code === 'P2002' && clientMessageId) {
+        const existing = await this.db.chatMessage.findUnique({
+          where: {
+            sender_id_client_message_id: {
+              sender_id: senderId,
+              client_message_id: clientMessageId,
+            },
+          },
+          include: { sender: { select: { id: true, full_name: true } } },
+        });
+        if (existing) return existing;
+      }
+      throw err;
+    }
+  }
+
+  // ─── Lấy lịch sử tin nhắn (cursor pagination) ─────────────────────────────
+  // Strategy: query DESC theo created_at để load page cũ hơn, sau đó reverse về ASC để FE render.
+  // - limit: số tin nhắn / trang (default 30, tối đa 100)
+  // - beforeMessageId: lấy các tin nhắn được tạo TRƯỚC message này (cho infinite scroll lên)
+  async getMessages(
+    conversationId: string,
+    requesterId: string,
+    opts: { limit?: number; beforeMessageId?: string } = {},
+  ) {
     const conv = await this.db.conversation.findUnique({ where: { id: conversationId } });
     if (!conv) throw new NotFoundException('Cuộc trò chuyện không tồn tại.');
     if (conv.user1_id !== requesterId && conv.user2_id !== requesterId) {
       throw new ForbiddenException('Bạn không có quyền xem cuộc trò chuyện này.');
     }
 
+    const take = Math.min(Math.max(opts.limit ?? 30, 1), 100);
+
     const messages = await this.db.chatMessage.findMany({
       where: { conversation_id: conversationId },
-      orderBy: { created_at: 'asc' },
+      orderBy: { created_at: 'desc' },
+      take: take + 1, // lấy thừa 1 để biết còn page trước nữa không
+      ...(opts.beforeMessageId
+        ? { cursor: { id: opts.beforeMessageId }, skip: 1 }
+        : {}),
       include: {
         sender: { select: { id: true, full_name: true } },
         context_product: {
@@ -147,9 +348,15 @@ export class ChatService {
       },
     });
 
+    const hasMore = messages.length > take;
+    const page = hasMore ? messages.slice(0, take) : messages;
+    const nextCursor = hasMore ? page[page.length - 1].id : null;
+    // Đảo lại ASC cho FE hiển thị (cũ → mới)
+    page.reverse();
+
     // Lấy ảnh cho tất cả context_product một lần (tránh N+1)
     const productIds = [...new Set(
-      messages.map((m) => m.context_product_id).filter(Boolean),
+      page.map((m) => m.context_product_id).filter(Boolean),
     )] as string[];
     const attachmentsRaw = productIds.length
       ? await this.db.attachment.findMany({
@@ -163,11 +370,12 @@ export class ChatService {
       if (!imageMap.has(att.target_id)) imageMap.set(att.target_id, att.url);
     }
 
-    return messages.map((m) => ({
+    const items = page.map((m) => ({
       id: m.id,
       sender: m.sender,
       message_content: m.message_content,
       message_type: m.message_type,
+      image_url: m.image_url ?? null,
       created_at: m.created_at,
       // Badge sản phẩm — có ở SYSTEM message "Chat ngay" / startNegotiation và NEGOTIATION_QUOTE
       context_product: m.context_product
@@ -197,6 +405,8 @@ export class ChatService {
           }
         : null,
     }));
+
+    return { items, nextCursor, hasMore };
   }
 
   // ─── Danh sách conversation của user ─────────────────────────────────────
@@ -215,6 +425,24 @@ export class ChatService {
       },
       orderBy: { created_at: 'desc' },
     });
+
+    if (conversations.length === 0) return [];
+
+    // Tính unread mỗi conv. N ở đây nhỏ (<50) → đếm song song, đủ nhanh.
+    const unreadEntries = await Promise.all(
+      conversations.map(async (c) => {
+        const lastRead = c.user1_id === userId ? c.user1_last_read_at : c.user2_last_read_at;
+        const cnt = await this.db.chatMessage.count({
+          where: {
+            conversation_id: c.id,
+            sender_id: { not: userId },
+            ...(lastRead ? { created_at: { gt: lastRead } } : {}),
+          },
+        });
+        return [c.id, cnt] as const;
+      }),
+    );
+    const unreadMap = new Map<string, number>(unreadEntries);
 
     return Promise.all(
       conversations.map(async (conv) => {
@@ -242,6 +470,7 @@ export class ChatService {
                 created_at: lastMsg.created_at,
               }
             : null,
+          unread_count: unreadMap.get(conv.id) ?? 0,
           created_at: conv.created_at,
         };
       }),

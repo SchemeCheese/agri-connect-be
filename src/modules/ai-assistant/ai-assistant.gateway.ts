@@ -117,6 +117,9 @@ export class AIAssistantGateway implements OnGatewayConnection, OnGatewayDisconn
     @MessageBody() data: AskQuestionDto,
   ) {
     const userId = this.requireAuth(client);
+    this.logger.log(
+      `[AI-CHAT] ai:ask user=${userId} mode=${data?.mode} sessionId=${data?.sessionId ?? '∅'} content="${(data?.content ?? '').slice(0, 60)}"`,
+    );
 
     // Emit thinking immediately — user sees indicator before any LLM call
     client.emit('ai:thinking', { sessionId: data.sessionId ?? null });
@@ -125,23 +128,31 @@ export class AIAssistantGateway implements OnGatewayConnection, OnGatewayDisconn
       const result = await this.aiService.ask(userId, data);
 
       // Stream tokens to client
+      let tokenCount = 0;
       for await (const token of result.stream) {
         if (!client.connected) break; // Client disconnected — stop streaming
         client.emit('ai:token', {
           chunk: token,
           sessionId: result.sessionId,
         });
+        tokenCount++;
       }
 
+      this.logger.log(`[AI-CHAT] ai:complete user=${userId} session=${result.sessionId} tokens=${tokenCount}`);
       client.emit('ai:complete', {
         sessionId: result.sessionId,
         intent: result.intent,
       });
-    } catch (err) {
-      this.logger.error(`[AI-CHAT] Error for user ${userId}: ${err.message}`, err.stack);
+    } catch (err: any) {
+      this.logger.error(`[AI-CHAT] Error user=${userId}: ${err?.message}`, err?.stack);
+      // Phân loại lỗi: thiếu API key vs lỗi runtime để FE hiển thị message rõ ràng
+      const raw = err?.message ?? '';
+      const isAuthErr = /401|api[\s-]?key|unauthorized/i.test(raw);
       client.emit('ai:error', {
-        code: 'INTERNAL_ERROR',
-        message: 'Xin lỗi, đã có lỗi xảy ra. Vui lòng thử lại.',
+        code: isAuthErr ? 'CONFIG_ERROR' : 'INTERNAL_ERROR',
+        message: isAuthErr
+          ? 'Trợ lý AI chưa cấu hình đúng (GROQ_API_KEY). Liên hệ admin.'
+          : `Lỗi xử lý: ${raw.slice(0, 200) || 'Vui lòng thử lại'}`,
       });
     }
 

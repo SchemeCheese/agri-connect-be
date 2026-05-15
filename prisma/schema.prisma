@@ -52,6 +52,7 @@ enum DiscountType {
 
 enum MessageType {
   TEXT               // Tin nhắn thường
+  IMAGE              // Tin nhắn chỉ chứa ảnh (image_url bắt buộc)
   NEGOTIATION_QUOTE  // Card báo giá từ seller
   SYSTEM             // Tin nhắn hệ thống (tự động)
 }
@@ -218,6 +219,10 @@ model Conversation {
   messages   ChatMessage[]
   created_at DateTime      @default(now())
 
+  // Mốc đã đọc cho mỗi participant — null = chưa từng đọc → unread = toàn bộ tin nhắn từ partner
+  user1_last_read_at DateTime?
+  user2_last_read_at DateTime?
+
   // Đảm bảo mỗi cặp buyer-seller chỉ có đúng 1 conversation
   @@unique([user1_id, user2_id])
 }
@@ -247,7 +252,17 @@ model ChatMessage {
   quote_unit         String?
   quote_status       QuoteStatus?
 
+  // Idempotency key — FE/APP sinh UUID khi gửi để chống duplicate khi retry/reconnect
+  client_message_id  String?
+
+  // URL ảnh đính kèm — set khi message_type = IMAGE (hoặc TEXT có ảnh)
+  // Chỉ hỗ trợ 1 ảnh / message để đơn giản hóa Phase 1
+  image_url          String?
+
   created_at      DateTime     @default(now())
+
+  @@unique([sender_id, client_message_id])
+  @@index([conversation_id, created_at])
 }
 
 model Review {
