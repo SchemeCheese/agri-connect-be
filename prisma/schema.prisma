@@ -71,6 +71,13 @@ enum BehaviorAction {
   PURCHASE
 }
 
+enum ProductStatus {
+  ACTIVE        // stock > 0, seller publishing
+  OUT_OF_STOCK  // stock = 0, not manually removed
+  INACTIVE      // seller temporarily deactivated, can be restored
+  DELETED       // seller soft-deleted; row preserved for history/orders
+}
+
 // --- Enum mới cho OTP (Theo repo mẫu) ---
 enum AccountIdentifier {
   EMAIL
@@ -161,7 +168,8 @@ model Product {
   location             String?
   certification        String?
   min_negotiation_qty  Decimal?    @db.Decimal(10, 2) // null = không cho thương lượng; > 0 = số lượng tối thiểu
-  is_active            Boolean     @default(true)
+  is_active            Boolean     @default(true)     // kept in sync with status: ACTIVE → true, anything else → false
+  status               ProductStatus @default(ACTIVE) // authoritative lifecycle state
   created_at           DateTime    @default(now())
   updated_at           DateTime    @updatedAt
   order_items          OrderItem[]

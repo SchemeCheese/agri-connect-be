@@ -6,7 +6,19 @@ import {
 } from '@nestjs/common';
 import { DatabaseService } from '../../database/database.service';
 import { CreateProductDto } from './dtos/create-product.dto';
-import { TargetType } from '@prisma/client';
+import { TargetType, ProductStatus } from '@prisma/client';
+
+/**
+ * Stock-driven part of the lifecycle:
+ *   stock > 0 → ACTIVE,  stock = 0 → OUT_OF_STOCK
+ * Manual terminal states (INACTIVE, DELETED) are sticky — restock/setStatus
+ * are the only ways to leave them. is_active mirrors status === ACTIVE so
+ * existing buyer queries (`where: { is_active: true }`) keep working.
+ */
+function deriveStockStatus(stock: number, current?: ProductStatus): ProductStatus {
+  if (current === ProductStatus.DELETED || current === ProductStatus.INACTIVE) return current;
+  return stock > 0 ? ProductStatus.ACTIVE : ProductStatus.OUT_OF_STOCK;
+}
 
 type NormalizedProductPayload = {
   name: string;
@@ -111,6 +123,7 @@ export class ProductsService {
   async create(sellerId: string, dto: CreateProductDto, files: Express.Multer.File[] = []) {
     const payload = await this.normalizePayload(dto);
 
+    const initialStatus = deriveStockStatus(payload.stock_quantity);
     const product = await this.db.product.create({
       data: {
         name: payload.name,
@@ -123,7 +136,8 @@ export class ProductsService {
         seller_id: sellerId,
         category_id: payload.category_id,
         min_negotiation_qty: payload.min_negotiation_qty,
-        is_active: payload.is_active,
+        is_active: initialStatus === ProductStatus.ACTIVE,
+        status: initialStatus,
       },
     });
 
@@ -164,23 +178,32 @@ export class ProductsService {
     });
     const imageMap = this.mapAttachmentsByTarget(attachments);
 
-    // Đồng bộ trạng thái is_active theo tồn kho (0 => hết hàng => false, >0 => true)
+    // Sync status + is_active with current stock_quantity. Sticky terminal states
+    // (DELETED, INACTIVE) are preserved by deriveStockStatus.
     const activationUpdates = products
       .map((p) => {
-        const inStock = Number(p.stock_quantity) > 0;
-        const shouldBeActive = inStock;
-        return shouldBeActive !== p.is_active
-          ? { id: p.id, is_active: shouldBeActive }
+        const stock = Number(p.stock_quantity);
+        const nextStatus = deriveStockStatus(stock, p.status);
+        const nextActive = nextStatus === ProductStatus.ACTIVE;
+        return nextStatus !== p.status || nextActive !== p.is_active
+          ? { id: p.id, status: nextStatus, is_active: nextActive }
           : null;
       })
-      .filter(Boolean) as { id: string; is_active: boolean }[];
+      .filter(Boolean) as { id: string; status: ProductStatus; is_active: boolean }[];
 
     if (activationUpdates.length > 0) {
       await Promise.all(
         activationUpdates.map((u) =>
-          this.db.product.update({ where: { id: u.id }, data: { is_active: u.is_active } }),
+          this.db.product.update({
+            where: { id: u.id },
+            data: { is_active: u.is_active, status: u.status },
+          }),
         ),
       );
+      for (const u of activationUpdates) {
+        const p = products.find((x) => x.id === u.id);
+        if (p) { p.is_active = u.is_active; p.status = u.status; }
+      }
     }
 
     return products.map((p) => {
@@ -204,7 +227,7 @@ export class ProductsService {
         rating: 5,
         sold,
         is_active: isActive,
-        status: stock > 0 ? 'IN_STOCK' : 'OUT_OF_STOCK',
+        status: p.status,
         created_at: p.created_at,
         min_negotiation_qty: p.min_negotiation_qty
           ? Number(p.min_negotiation_qty)
@@ -439,6 +462,7 @@ export class ProductsService {
         ? null
         : dto.min_negotiation_qty;
 
+    const nextStatus = deriveStockStatus(nextStock, product.status);
     const updated = await this.db.product.update({
       where: { id: productId },
       data: {
@@ -455,7 +479,8 @@ export class ProductsService {
         ...(dto.certification !== undefined ? { certification: dto.certification } : {}),
         ...(categoryId !== undefined ? { category_id: categoryId } : {}),
         ...(minNegotiation !== undefined ? { min_negotiation_qty: minNegotiation } : {}),
-        is_active: nextStock > 0,
+        status: nextStatus,
+        is_active: nextStatus === ProductStatus.ACTIVE,
       },
     });
 
@@ -478,19 +503,89 @@ export class ProductsService {
     return updated;
   }
 
-  // ─── DELETE /products/:id — Xóa/ẩn sản phẩm (SELLER) ──────────────────
+  // ─── DELETE /products/:id — Soft delete (preserves row + order history) ─
   async deleteProduct(sellerId: string, productId: string) {
     const product = await this.db.product.findUnique({ where: { id: productId } });
     if (!product) throw new NotFoundException('Sản phẩm không tồn tại.');
     if (product.seller_id !== sellerId)
       throw new ForbiddenException('Bạn không có quyền xóa sản phẩm này.');
 
-    // Ẩn sản phẩm thay vì xóa cứng để bảo toàn dữ liệu lịch sử
-    await this.db.product.update({
+    const updated = await this.db.product.update({
       where: { id: productId },
-      data: { is_active: false },
+      data: { status: ProductStatus.DELETED, is_active: false },
     });
-    return { message: 'Sản phẩm đã được ẩn khỏi danh sách bán.' };
+    return { message: 'Sản phẩm đã được ẩn khỏi danh sách bán.', data: updated };
+  }
+
+  // ─── PATCH /seller/products/:id/status — Manual lifecycle switch ─────────
+  // Allowed transitions:
+  //   ACTIVE     → INACTIVE | DELETED
+  //   INACTIVE   → ACTIVE   (if stock>0; else OUT_OF_STOCK) | DELETED
+  //   OUT_OF_STOCK → INACTIVE | DELETED   (ACTIVE requires real stock — use /restock)
+  //   DELETED    → INACTIVE | (ACTIVE/OUT_OF_STOCK via stock derivation)
+  async setStatus(sellerId: string, productId: string, requested: ProductStatus) {
+    const product = await this.db.product.findUnique({ where: { id: productId } });
+    if (!product) throw new NotFoundException('Sản phẩm không tồn tại.');
+    if (product.seller_id !== sellerId)
+      throw new ForbiddenException('Bạn không có quyền đổi trạng thái sản phẩm này.');
+
+    const stock = Number(product.stock_quantity);
+    let target = requested;
+    if (requested === ProductStatus.ACTIVE && stock <= 0) {
+      // Can't go ACTIVE without stock — auto-correct to OUT_OF_STOCK
+      target = ProductStatus.OUT_OF_STOCK;
+    }
+    if (requested === ProductStatus.OUT_OF_STOCK && stock > 0) {
+      throw new BadRequestException(
+        'Sản phẩm còn hàng — không thể đặt OUT_OF_STOCK. Dùng INACTIVE nếu muốn tạm ẩn.',
+      );
+    }
+
+    const updated = await this.db.product.update({
+      where: { id: productId },
+      data: { status: target, is_active: target === ProductStatus.ACTIVE },
+    });
+    return { message: 'Đã cập nhật trạng thái sản phẩm.', data: updated };
+  }
+
+  // ─── PATCH /seller/products/:id/restock — Top up stock + auto-reactivate ─
+  // Accepts either { stock } (absolute) or { add } (delta). After update,
+  // status becomes ACTIVE if stock>0 (lifts INACTIVE/DELETED/OUT_OF_STOCK).
+  async restockProduct(
+    sellerId: string,
+    productId: string,
+    body: { stock?: number; add?: number },
+  ) {
+    const product = await this.db.product.findUnique({ where: { id: productId } });
+    if (!product) throw new NotFoundException('Sản phẩm không tồn tại.');
+    if (product.seller_id !== sellerId)
+      throw new ForbiddenException('Bạn không có quyền restock sản phẩm này.');
+
+    const currentStock = Number(product.stock_quantity);
+    let nextStock: number;
+    if (body.stock !== undefined && body.stock !== null) {
+      nextStock = Number(body.stock);
+    } else if (body.add !== undefined && body.add !== null) {
+      nextStock = currentStock + Number(body.add);
+    } else {
+      throw new BadRequestException('Cần truyền stock hoặc add.');
+    }
+    if (!Number.isFinite(nextStock) || nextStock < 0) {
+      throw new BadRequestException('Số lượng tồn kho không hợp lệ.');
+    }
+
+    // Restock explicitly lifts terminal states — pass `undefined` so derive
+    // computes purely from stock instead of preserving DELETED/INACTIVE.
+    const nextStatus = nextStock > 0 ? ProductStatus.ACTIVE : ProductStatus.OUT_OF_STOCK;
+    const updated = await this.db.product.update({
+      where: { id: productId },
+      data: {
+        stock_quantity: nextStock,
+        status: nextStatus,
+        is_active: nextStatus === ProductStatus.ACTIVE,
+      },
+    });
+    return { message: 'Đã cập nhật tồn kho sản phẩm.', data: updated };
   }
 
   // ─── GET /sellers/:id — Trang chi tiết người bán ────────────────────────
