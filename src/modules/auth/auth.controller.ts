@@ -24,6 +24,19 @@ export class AuthController {
     return this.authService.loginWithFirebase(dto);
   }
 
+  /**
+   * POST /auth/sync
+   * Upsert a user record from a Firebase ID token. Idempotent: safe to call on
+   * every Firebase sign-in (Google, email/password via Firebase, future providers).
+   * Validates the token server-side via Firebase Admin, then inserts or updates
+   * the row keyed by firebase_uid. Returns the app's JWT + user shape.
+   * Alias of /auth/firebase with a clearer name for FE callers.
+   */
+  @Post('sync')
+  syncFromFirebase(@Body() dto: FirebaseLoginDto) {
+    return this.authService.loginWithFirebase(dto);
+  }
+
   // THÊM API MỚI CHO OTP
   @Post('verify-email')
   verifyEmail(@Body() body: { userId: string; code: string }) {

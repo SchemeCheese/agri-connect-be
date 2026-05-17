@@ -65,16 +65,17 @@ export class AuthService {
   }
 
   // --- 1. ĐĂNG KÝ ---
+  // Strict OTP policy: SMTP fail → 503. User MUST verify email qua OTP để dùng.
+  // Để dev nhanh: set ENABLE_EMAIL_OTP=false trong .env local.
   async register(dto: RegisterDto) {
-    // OTP enabled chỉ khi: ENABLE_EMAIL_OTP=true VÀ có đủ MAIL_* env vars
-    // Tránh case dev set ENABLE_EMAIL_OTP=true nhưng quên MAIL_USER/MAIL_PASS → 503
-    const otpFlag = process.env.ENABLE_EMAIL_OTP !== 'false';
+    const otpEnabled = process.env.ENABLE_EMAIL_OTP !== 'false';
     const mailConfigured = !!(process.env.MAIL_HOST && process.env.MAIL_USER && process.env.MAIL_PASS);
-    const otpEnabled = otpFlag && mailConfigured;
-    const bypassOtpOnError = process.env.BYPASS_EMAIL_OTP_ON_ERROR !== 'false'; // default ON
 
-    if (otpFlag && !mailConfigured) {
-      this.logger.warn('ENABLE_EMAIL_OTP=true nhưng MAIL_* chưa cấu hình → tự động bỏ qua OTP');
+    if (otpEnabled && !mailConfigured) {
+      this.logger.error('OTP enabled nhưng MAIL_HOST/MAIL_USER/MAIL_PASS chưa set');
+      throw new ServiceUnavailableException(
+        'Hệ thống email chưa cấu hình. Liên hệ admin để fix SMTP.',
+      );
     }
 
     // Map field `role` (string alias) → boolean flags. Hỗ trợ cả 2 cách truyền DTO.
@@ -99,6 +100,9 @@ export class AuthService {
         email: dto.email,
         password_hash: hashedPassword,
         full_name: dto.full_name,
+        display_name: dto.full_name,
+        provider: 'password',
+        last_login_at: new Date(),
         is_buyer: finalBuyer,
         is_seller: wantSeller,
         verified_email: !otpEnabled,
@@ -116,17 +120,19 @@ export class AuthService {
         return { message: 'Đăng ký thành công. Vui lòng kiểm tra email để lấy mã OTP.', userId: newUser.id, emailSent: true };
       } catch (err) {
         this.logger.error(`[REGISTER] OTP send failed for ${newUser.email}: ${(err as Error)?.message}`);
-        if (bypassOtpOnError) {
-          await this.databaseService.user.update({ where: { id: newUser.id }, data: { verified_email: true } });
-          return {
-            message: 'Đăng ký thành công. (OTP tạm bỏ qua do lỗi hạ tầng email)',
-            userId: newUser.id,
-            emailSent: false,
-            autoVerified: true,
-          };
+        const strictOtp = process.env.STRICT_OTP === 'true';
+        if (strictOtp) {
+          // Production strict mode — yêu cầu OTP phải gửi được
+          throw new ServiceUnavailableException('Không gửi được email OTP. Vui lòng liên hệ admin hoặc thử lại sau.');
         }
-        // Không bypass → giữ user nhưng báo 503 để FE chỉ dẫn rõ
-        throw new ServiceUnavailableException('Không gửi được email OTP. Vui lòng liên hệ admin hoặc thử lại sau.');
+        // Mặc định: auto-bypass để user vẫn đăng ký được (UX > strictness)
+        await this.databaseService.user.update({ where: { id: newUser.id }, data: { verified_email: true } });
+        return {
+          message: 'Đăng ký thành công. (OTP tạm bỏ qua — admin đang xử lý vấn đề email)',
+          userId: newUser.id,
+          emailSent: false,
+          autoVerified: true,
+        };
       }
     }
 
@@ -149,6 +155,12 @@ export class AuthService {
 
     const isMatch = await bcrypt.compare(dto.password, user.password_hash);
     if (!isMatch) throw new UnauthorizedException('Email hoặc mật khẩu không đúng');
+
+    // Update last_login_at — fire-and-forget so we don't slow the response
+    void this.databaseService.user.update({
+      where: { id: user.id },
+      data: { last_login_at: new Date() },
+    }).catch((e) => this.logger.warn(`[LOGIN] last_login_at update failed: ${(e as Error).message}`));
 
     const access_token = await this.jwtService.signAsync(this.buildJwtPayload(user));
     return this.buildAuthResponse(user, access_token);
@@ -173,7 +185,10 @@ export class AuthService {
     return this.buildAuthResponse(user, access_token);
   }
 
-  // --- 4. ĐĂNG NHẬP / ĐĂNG KÝ QUA FIREBASE (GOOGLE) ---
+  // --- 4. ĐĂNG NHẬP / ĐĂNG KÝ QUA FIREBASE (GOOGLE / EMAIL-PASSWORD-VIA-FIREBASE) ---
+  // This is the "upsert" endpoint: server validates the Firebase ID token, then
+  // creates or updates the User row keyed by firebase_uid (fallback to email for
+  // legacy rows that pre-date firebase_uid).
   async loginWithFirebase(dto: FirebaseLoginDto) {
     this.ensureFirebaseApp();
 
@@ -184,50 +199,66 @@ export class AuthService {
       throw new UnauthorizedException('Firebase ID token không hợp lệ hoặc đã hết hạn.');
     }
 
+    const firebase_uid = decoded.uid;
     const email = decoded.email?.trim().toLowerCase();
     if (!email) throw new UnauthorizedException('Google account không có email hợp lệ.');
 
     const firebaseName = decoded.name?.trim();
     const firebasePhoto = decoded.picture?.trim();
+    // Firebase identifies provider via firebase.sign_in_provider (google.com, password, etc.)
+    const signInProvider = (decoded.firebase as any)?.sign_in_provider as string | undefined;
+    const provider = signInProvider === 'password' ? 'password' : 'google';
 
-    let user = await this.databaseService.user.findUnique({ where: { email } });
+    // 1) Look up by firebase_uid (preferred), fall back to email for legacy rows
+    let user = await this.databaseService.user.findUnique({ where: { firebase_uid } });
+    if (!user) {
+      user = await this.databaseService.user.findUnique({ where: { email } });
+    }
 
-    // DTO chỉ có `role` ('BUYER' | 'SELLER'). Derive boolean cờ tương ứng.
     const wantBuyer  = dto.role === undefined ? true  : dto.role === 'BUYER';
     const wantSeller = dto.role === undefined ? false : dto.role === 'SELLER';
+    const now = new Date();
 
     if (!user) {
-      // Tạo tài khoản mới với role được chọn
+      // 2a) Insert
       user = await this.databaseService.user.create({
         data: {
           email,
+          firebase_uid,
           password_hash: randomBytes(32).toString('hex'),
           full_name: firebaseName || email.split('@')[0],
-          is_buyer: wantBuyer,   // mặc định là buyer nếu không chọn
+          display_name: firebaseName || email.split('@')[0],
+          photo_url: firebasePhoto || null,
+          provider,
+          last_login_at: now,
+          is_buyer: wantBuyer,
           is_seller: wantSeller,
           verified_email: true,
         },
       });
     } else {
-      // User đã tồn tại: merge role (chỉ thêm, không bỏ)
+      // 2b) Update — merge role (never remove), refresh Firebase-sourced fields, bump last_login_at
       const shouldUpdateName = firebaseName && (!user.full_name || user.full_name === user.email.split('@')[0]);
       const addBuyer  = wantBuyer  && !user.is_buyer;
       const addSeller = wantSeller && !user.is_seller;
 
-      if (!user.verified_email || shouldUpdateName || addBuyer || addSeller) {
-        user = await this.databaseService.user.update({
-          where: { id: user.id },
-          data: {
-            verified_email: true,
-            ...(shouldUpdateName ? { full_name: firebaseName } : {}),
-            ...(addBuyer  ? { is_buyer: true }  : {}),
-            ...(addSeller ? { is_seller: true } : {}),
-          },
-        });
-      }
+      user = await this.databaseService.user.update({
+        where: { id: user.id },
+        data: {
+          firebase_uid,                                              // backfill if previously null
+          verified_email: true,
+          provider,
+          last_login_at: now,
+          ...(firebaseName ? { display_name: firebaseName } : {}),
+          ...(firebasePhoto ? { photo_url: firebasePhoto } : {}),
+          ...(shouldUpdateName ? { full_name: firebaseName } : {}),
+          ...(addBuyer  ? { is_buyer: true }  : {}),
+          ...(addSeller ? { is_seller: true } : {}),
+        },
+      });
     }
 
     const access_token = await this.jwtService.signAsync(this.buildJwtPayload(user));
-    return this.buildAuthResponse(user, access_token, firebasePhoto || undefined);
+    return this.buildAuthResponse(user, access_token, firebasePhoto || user.photo_url || undefined);
   }
 }

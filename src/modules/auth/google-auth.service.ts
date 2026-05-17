@@ -55,12 +55,16 @@ export class GoogleAuthService {
       throw new UnauthorizedException('Firebase ID token không hợp lệ hoặc đã hết hạn.');
     }
 
+    const firebase_uid = decoded.uid;
     const email = decoded.email?.trim().toLowerCase();
     if (!email) throw new UnauthorizedException('Google account không có email hợp lệ.');
 
     const firebaseName = decoded.name?.trim();
-    const existing = await this.prisma.user.findUnique({ where: { email } });
+    const firebasePhoto = decoded.picture?.trim();
+    const existing = (await this.prisma.user.findUnique({ where: { firebase_uid } }))
+      ?? (await this.prisma.user.findUnique({ where: { email } }));
     const flags = this.roleFlags(role);
+    const now = new Date();
 
     if (existing) {
       const roleAlreadyExists = flags.is_buyer ? existing.is_buyer : flags.is_seller ? existing.is_seller : false;
@@ -71,8 +75,13 @@ export class GoogleAuthService {
       const updated = await this.prisma.user.update({
         where: { id: existing.id },
         data: {
+          firebase_uid,
           verified_email: true,
           full_name: existing.full_name || firebaseName || email.split('@')[0],
+          display_name: firebaseName || existing.display_name,
+          photo_url: firebasePhoto || existing.photo_url,
+          provider: 'google',
+          last_login_at: now,
           ...flags,
         },
       });
@@ -93,8 +102,13 @@ export class GoogleAuthService {
     const created = await this.prisma.user.create({
       data: {
         email,
+        firebase_uid,
         password_hash: await bcrypt.hash(randomBytes(16).toString('hex'), 10),
         full_name: firebaseName || email.split('@')[0],
+        display_name: firebaseName || email.split('@')[0],
+        photo_url: firebasePhoto || null,
+        provider: 'google',
+        last_login_at: now,
         verified_email: true,
         is_admin: false,
         ...flags,
@@ -124,13 +138,26 @@ export class GoogleAuthService {
       throw new UnauthorizedException('Firebase ID token không hợp lệ hoặc đã hết hạn.');
     }
 
+    const firebase_uid = decoded.uid;
     const email = decoded.email?.trim().toLowerCase();
     if (!email) throw new UnauthorizedException('Google account không có email hợp lệ.');
 
-    const user = await this.prisma.user.findUnique({ where: { email } });
+    let user = (await this.prisma.user.findUnique({ where: { firebase_uid } }))
+      ?? (await this.prisma.user.findUnique({ where: { email } }));
     if (!user) {
       throw new HttpException('Tài khoản chưa được đăng ký. Vui lòng đăng ký trước.', HttpStatus.NOT_FOUND);
     }
+    // Touch sync fields + last_login_at every time we let them in
+    user = await this.prisma.user.update({
+      where: { id: user.id },
+      data: {
+        firebase_uid,
+        provider: 'google',
+        last_login_at: new Date(),
+        ...(decoded.name ? { display_name: decoded.name.trim() } : {}),
+        ...(decoded.picture ? { photo_url: decoded.picture.trim() } : {}),
+      },
+    });
 
     if (selectedRole) {
       const selectedRoleIsBuyer = selectedRole === GoogleAuthRole.BUYER;

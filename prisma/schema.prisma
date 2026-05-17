@@ -88,10 +88,17 @@ model User {
   is_admin       Boolean   @default(false)
   full_name      String
   phone_number   String?
-  
+
   // --- THÊM TRƯỜNG XÁC THỰC ---
-  verified_email Boolean   @default(false)
-  
+  verified_email Boolean   @default(false)   // alias for spec's email_verified
+
+  // ─── Firebase / multi-provider sync ──────────────────────────────────────
+  firebase_uid   String?   @unique           // Firebase Auth uid — present once user passes through Firebase (Google or email/password via Firebase)
+  display_name   String?                     // Firebase displayName / profile name
+  photo_url      String?                     // Firebase photoURL
+  provider       String?                     // 'password' | 'google'
+  last_login_at  DateTime?                   // Updated on every successful auth
+
   is_active      Boolean   @default(true)
   created_at     DateTime  @default(now())
   updated_at     DateTime  @updatedAt
