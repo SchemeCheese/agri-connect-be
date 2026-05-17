@@ -6,6 +6,7 @@ import {
   UseGuards,
   Request,
   Post,
+  Delete,
   UploadedFile,
   UseInterceptors,
   BadRequestException,
@@ -16,6 +17,7 @@ import { extname, join } from 'path';
 import { randomUUID } from 'crypto';
 import { ProfileService } from './profile.service';
 import { UpdateProfileDto } from './dtos/update-profile.dto';
+import { RemoveBannerDto } from './dtos/remove-banner.dto';
 import { JwtAuthGuard } from '../auth/decorators/guards/jwt-auth.guard';
 
 // Cấu hình lưu file vào thư mục public/uploads/avatars/
@@ -123,5 +125,39 @@ export class ProfileController {
     if (!file) throw new BadRequestException('Không có file được gửi lên.');
     const fileUrl = `/uploads/avatars/${file.filename}`;
     return this.profileService.updateCover(req.user.sub, fileUrl);
+  }
+
+  /**
+   * POST /profile/me/banners — Append one banner image (max 3 active).
+   * Content-Type: multipart/form-data, field: "file"
+   * Returns { banners: string[] } — the full ordered list after append.
+   */
+  @Post('me/banners')
+  @UseInterceptors(
+    FileInterceptor('file', {
+      storage: avatarStorage,
+      fileFilter: imageFileFilter,
+      limits: { fileSize: 5 * 1024 * 1024 },
+    }),
+  )
+  async addShopBanner(
+    @Request() req,
+    @UploadedFile() file: Express.Multer.File,
+  ) {
+    if (!file) throw new BadRequestException('Không có file được gửi lên.');
+    const fileUrl = `/uploads/avatars/${file.filename}`;
+    return this.profileService.addBanner(req.user.sub, fileUrl);
+  }
+
+  /**
+   * DELETE /profile/me/banners — Remove one banner by URL from banners1[].
+   * Body: { url: string } — must be the stored relative path (e.g. /uploads/avatars/xxx.png)
+   */
+  @Delete('me/banners')
+  async deleteShopBanner(
+    @Request() req,
+    @Body() body: RemoveBannerDto,
+  ) {
+    return this.profileService.removeBanner(req.user.sub, body.url);
   }
 }

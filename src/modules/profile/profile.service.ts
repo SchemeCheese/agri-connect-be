@@ -197,4 +197,35 @@ export class ProfileService {
     });
     return { cover_url: fileUrl };
   }
+
+  // ─── POST /profile/me/banners — append one image to banners1 (max 3) ─────
+  async addBanner(userId: string, fileUrl: string) {
+    const profile = await this.db.profile.findUnique({ where: { user_id: userId } });
+    const current = profile?.banners1 ?? [];
+    if (current.length >= 3) {
+      throw new BadRequestException('Tối đa 3 banner — hãy xóa bớt trước khi thêm.');
+    }
+    const next = [...current, fileUrl];
+    await this.db.profile.upsert({
+      where: { user_id: userId },
+      update: { banners1: next },
+      create: { user_id: userId, banners1: next },
+    });
+    return { banners: next };
+  }
+
+  // ─── DELETE /profile/me/banners — remove one image from banners1 ─────────
+  async removeBanner(userId: string, url: string) {
+    const profile = await this.db.profile.findUnique({ where: { user_id: userId } });
+    const current = profile?.banners1 ?? [];
+    const next = current.filter((u) => u !== url);
+    if (next.length === current.length) {
+      throw new NotFoundException('Banner không tồn tại trong shop.');
+    }
+    await this.db.profile.update({
+      where: { user_id: userId },
+      data: { banners1: next },
+    });
+    return { banners: next };
+  }
 }

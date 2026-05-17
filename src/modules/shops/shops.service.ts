@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { DatabaseService } from '../../database/database.service';
+import { buildMapsOpenUrl } from '../profile/profile.service';
 
 type TopShopSort = 'sales' | 'rating' | 'reviews';
 
@@ -165,6 +166,12 @@ export class ShopsService {
       return acc;
     }, {} as Record<string, string[]>);
 
+    const shopLat =
+      seller.profile?.shop_latitude != null ? Number(seller.profile.shop_latitude) : null;
+    const shopLng =
+      seller.profile?.shop_longitude != null ? Number(seller.profile.shop_longitude) : null;
+    const banners = (seller.profile?.banners1 ?? []).slice(0, 3);
+
     return {
       id: seller.id,
       store_name: seller.profile?.store_name || seller.full_name,
@@ -172,6 +179,17 @@ export class ShopsService {
       description: seller.profile?.description ?? null,
       avatar_url: avatar?.url ?? null,
       banner_url: seller.profile?.cover_url ?? null,
+      banners,
+      shop_location_name: seller.profile?.shop_location_name ?? null,
+      shop_google_maps_url: seller.profile?.shop_google_maps_url ?? null,
+      shop_latitude: shopLat,
+      shop_longitude: shopLng,
+      shop_maps_open_url: buildMapsOpenUrl({
+        shop_google_maps_url: seller.profile?.shop_google_maps_url,
+        shop_latitude: shopLat,
+        shop_longitude: shopLng,
+        address: seller.profile?.address,
+      }),
       avg_rating: reviewAgg._avg.rating ?? 0,
       total_reviews: reviewAgg._count.id,
       total_sales: salesCount,
