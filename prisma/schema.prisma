@@ -140,6 +140,13 @@ model Profile {
   cover_url      String?           // Ảnh bìa của shop
   banners1       String[] @default([])  // Banner dưới thông tin shop (tối đa 6 ảnh)
   banners2       String[] @default([])  // Banner dưới "Gợi ý cho bạn" (tối đa 6 ảnh)
+
+  // ─── Shop location / Google Maps ────────────────────────────────────────
+  shop_location_name    String?                       // Friendly label, e.g. "Nông trại Đà Lạt"
+  shop_google_maps_url  String?                       // Raw URL pasted by seller
+  shop_latitude         Decimal? @db.Decimal(10, 7)   // Parsed from URL or autocomplete
+  shop_longitude        Decimal? @db.Decimal(10, 7)
+  place_id              String?                       // Google Places place_id, if available
   created_at     DateTime @default(now())
   updated_at     DateTime @updatedAt
 }

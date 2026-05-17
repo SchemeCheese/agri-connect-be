@@ -647,6 +647,20 @@ export class ProductsService {
           )
         : 5;
 
+    // Shop location — build a public-safe Google Maps open URL on the BE so
+    // the buyer FE can render a single href without redoing the fallback logic.
+    const lat  = seller.profile?.shop_latitude  != null ? Number(seller.profile.shop_latitude)  : null;
+    const lng  = seller.profile?.shop_longitude != null ? Number(seller.profile.shop_longitude) : null;
+    const rawMapsUrl = seller.profile?.shop_google_maps_url || null;
+    const address    = seller.profile?.address || null;
+    const mapsOpenUrl = rawMapsUrl
+      ? rawMapsUrl
+      : (lat != null && lng != null)
+        ? `https://www.google.com/maps/search/?api=1&query=${lat},${lng}`
+        : (address && address.trim())
+          ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(address.trim())}`
+          : null;
+
     return {
       // Đặt flat fields để FE có thể dùng trực tiếp
       id: seller.id,
@@ -670,6 +684,12 @@ export class ProductsService {
         totalSold,
         totalProducts: products.length,
         joinDate: seller.created_at,
+        // Public-safe shop location surface — never leaks private user data.
+        shop_location_name:   seller.profile?.shop_location_name ?? null,
+        shop_google_maps_url: rawMapsUrl,
+        shop_latitude:        lat,
+        shop_longitude:       lng,
+        shop_maps_open_url:   mapsOpenUrl,
       },
       products: products.map((p) => ({
         id: p.id,
