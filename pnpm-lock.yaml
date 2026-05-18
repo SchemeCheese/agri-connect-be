@@ -129,6 +129,9 @@ importers:
       '@types/uuid':
         specifier: ^11.0.0
         version: 11.0.0
+      ajv:
+        specifier: ^8.17.1
+        version: 8.17.1
       eslint:
         specifier: ^9.18.0
         version: 9.39.2(jiti@2.6.1)

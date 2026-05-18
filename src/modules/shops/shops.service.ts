@@ -29,6 +29,10 @@ export class ShopsService {
             address: true,
             description: true,
             cover_url: true,
+            shop_location_name: true,
+            shop_google_maps_url: true,
+            shop_latitude: true,
+            shop_longitude: true,
           },
         },
       },
@@ -89,17 +93,34 @@ export class ShopsService {
     );
 
     // 4. Combine và sort
-    const result = sellers.map((s) => ({
-      id: s.id,
-      store_name: s.profile?.store_name || s.full_name,
-      store_address: s.profile?.address ?? null,
-      description: s.profile?.description ?? null,
-      avatar_url: avatarMap[s.id] ?? null,
-      banner_url: s.profile?.cover_url ?? null,
-      avg_rating: reviewMap[s.id]?.avg_rating ?? 0,
-      total_reviews: reviewMap[s.id]?.total_reviews ?? 0,
-      total_sales: salesMap[s.id] ?? 0,
-    }));
+    const result = sellers.map((s) => {
+      const lat = s.profile?.shop_latitude != null ? Number(s.profile.shop_latitude) : null;
+      const lng = s.profile?.shop_longitude != null ? Number(s.profile.shop_longitude) : null;
+      return {
+        id: s.id,
+        store_name: s.profile?.store_name || s.full_name,
+        // `address` is canonical; `store_address` kept as alias for legacy FE mapping.
+        address: s.profile?.address ?? null,
+        store_address: s.profile?.address ?? null,
+        description: s.profile?.description ?? null,
+        avatar_url: avatarMap[s.id] ?? null,
+        banner_url: s.profile?.cover_url ?? null,
+        // ─── Shop location / Google Maps ─────────────────────────────────
+        shop_location_name: s.profile?.shop_location_name ?? null,
+        shop_google_maps_url: s.profile?.shop_google_maps_url ?? null,
+        shop_latitude: lat,
+        shop_longitude: lng,
+        shop_maps_open_url: buildMapsOpenUrl({
+          shop_google_maps_url: s.profile?.shop_google_maps_url,
+          shop_latitude: lat,
+          shop_longitude: lng,
+          address: s.profile?.address,
+        }),
+        avg_rating: reviewMap[s.id]?.avg_rating ?? 0,
+        total_reviews: reviewMap[s.id]?.total_reviews ?? 0,
+        total_sales: salesMap[s.id] ?? 0,
+      };
+    });
 
     // Sort
     if (sort === 'rating') {
@@ -175,6 +196,9 @@ export class ShopsService {
     return {
       id: seller.id,
       store_name: seller.profile?.store_name || seller.full_name,
+      // `address` is the canonical column; `store_address` is kept as an alias
+      // for the existing FE mapping. Buyer UI prefers shop_location_name → address.
+      address: seller.profile?.address ?? null,
       store_address: seller.profile?.address ?? null,
       description: seller.profile?.description ?? null,
       avatar_url: avatar?.url ?? null,
