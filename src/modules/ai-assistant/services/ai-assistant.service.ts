@@ -29,13 +29,25 @@ const FAST_MODEL = 'llama-3.1-8b-instant';
 
 const COMPLEX_INTENTS: IntentLabel[] = ['PRICE_ANALYSIS', 'NEGOTIATION_SUPPORT'];
 
-// Intents that must use tool calling to retrieve live data
+// Intents that must use tool calling to retrieve live data or knowledge-base content.
+// PLATFORM_GUIDE + FAQ go through get_platform_policy so the LLM cannot hallucinate UI steps.
 const TOOL_REQUIRED_INTENTS: IntentLabel[] = [
   'PRODUCT_SEARCH',
   'PRICE_ANALYSIS',
   'NEGOTIATION_SUPPORT',
   'SELLER_RECOMMENDATION',
+  'PLATFORM_GUIDE',
+  'FAQ',
 ];
+
+// Knowledge-base tools — their results are authoritative prose, not entity rows.
+// Grounding for these is "stay faithful to tool content", not "whitelist names".
+// Names here MUST match the wire name in tool-registry.ts (function.name).
+const KNOWLEDGE_TOOLS = new Set<string>(['get_platform_policy']);
+
+// Cap tool rounds for knowledge-only intents — one lookup is always enough,
+// extra rounds just burn 300-800ms of FAST_MODEL latency per request.
+const KNOWLEDGE_INTENT_MAX_ROUNDS = 1;
 
 const OFF_TOPIC_RESPONSE =
   'Tôi chỉ có thể hỗ trợ nghiệp vụ giao dịch nông sản trên Agri-Connect. ' +
@@ -179,10 +191,18 @@ export class AIAssistantService {
     const validEntities = new Set<string>();
     let totalToolItems = 0;
 
+    // Knowledge-only intents (PLATFORM_GUIDE, FAQ) never need multiple tool
+    // hops. Cap the loop so a borderline classification doesn't pay the full
+    // MAX_TOOL_ROUNDS latency budget.
+    const roundBudget =
+      intent === 'PLATFORM_GUIDE' || intent === 'FAQ'
+        ? KNOWLEDGE_INTENT_MAX_ROUNDS
+        : MAX_TOOL_ROUNDS;
+
     // Tool detection + execution loop (non-streaming)
     // Luôn dùng FAST_MODEL cho tool detection — chỉ cần nhận diện tool/argument,
     // không cần reasoning sâu. Tiết kiệm 500-1500ms/round so với 70b.
-    for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+    for (let round = 0; round < roundBudget; round++) {
       let toolResponse: Awaited<ReturnType<ILLMProvider['completeWithTools']>>;
       try {
         toolResponse = await this.llm.completeWithTools({
@@ -249,9 +269,24 @@ export class AIAssistantService {
       );
     }
 
-    // Grounding reminder — list entity hợp lệ explicit
-    const groundingContent = validEntities.size > 0
-      ? `[GROUNDING — STRICT]
+    // ── Grounding selection ──────────────────────────────────────────────
+    // Three cases, in priority order:
+    //   (a) Knowledge tool ran → tool body is the source of truth (no entity list).
+    //   (b) Retrieval tools returned entities → whitelist them by name.
+    //   (c) Tools ran but returned nothing → forced no-data response.
+    const hadKnowledgeTool = toolsCalled.some((n) => KNOWLEDGE_TOOLS.has(n));
+
+    const groundingContent = hadKnowledgeTool
+      ? `[GROUNDING — KNOWLEDGE BASE]
+Câu trả lời PHẢI bám sát nội dung do get_platform_policy trả về.
+TUYỆT ĐỐI KHÔNG:
+- Thêm bước thao tác KHÔNG có trong tool result
+- Bịa URL, mã giảm giá, hoa hồng, biểu phí mà tool không nhắc tới
+- Diễn giải sai trạng thái đơn hàng (PENDING/CONFIRMED/SHIPPING/COMPLETED)
+
+Hãy trình bày các bước dưới dạng danh sách rõ ràng, tiếng Việt, ngắn gọn.`
+      : validEntities.size > 0
+        ? `[GROUNDING — STRICT]
 Chỉ được nhắc đến các tên sau trong câu trả lời (chính xác đến từng ký tự):
 ${[...validEntities].map((e) => `- ${e}`).join('\n')}
 
@@ -263,7 +298,7 @@ TUYỆT ĐỐI KHÔNG:
 
 Nếu user hỏi về thứ KHÔNG có trong danh sách → trả lời:
 "Hệ thống chưa có dữ liệu phù hợp. Bạn có thể thử từ khóa khác hoặc xem trực tiếp tại mục Cửa hàng."`
-      : `[GROUNDING — NO DATA]
+        : `[GROUNDING — NO DATA]
 Tool đã chạy nhưng không trả về kết quả nào. PHẢI trả lời ĐÚNG MẪU:
 "Hệ thống chưa có dữ liệu cho yêu cầu này. Bạn có thể thử với từ khóa khác hoặc xem danh sách tại mục Cửa hàng/Sản phẩm."
 
@@ -274,9 +309,11 @@ KHÔNG được:
 
     workingMessages.push({ role: 'system', content: groundingContent });
 
-    // Final streaming answer: synthesize from all tool results
+    // Knowledge-tool answers shouldn't run the entity-whitelist validator —
+    // pass undefined so OutputValidator falls into knowledge mode (PII / leak
+    // / price guards still run unconditionally).
     yield* this.streamAndSave(sessionId, workingMessages, model, intent, toolsCalled, {
-      validEntities,
+      validEntities: hadKnowledgeTool ? undefined : validEntities,
       toolItemCount: totalToolItems,
     });
   }
@@ -316,10 +353,16 @@ KHÔNG được:
     model: string,
     intent: IntentLabel,
     toolsCalled: string[] = [],
-    validation?: { validEntities: Set<string>; toolItemCount: number },
+    validation?: { validEntities?: Set<string>; toolItemCount: number },
   ): AsyncGenerator<string> {
-    let fullContent = '';
+    // Pre-compute input-side tokens ONCE before streaming. The messages array
+    // is immutable from here, and waiting to reduce after the stream just
+    // delays generator close. Char-based (len/4) is the same heuristic as
+    // before, just hoisted out of the post-stream critical path.
+    const inputTokens = estimateMessagesTokens(messages);
+
     const maxTokens = this.config.get<number>('AI_MAX_TOKENS_PER_REQUEST', 800);
+    let fullContent = '';
     let streamError: unknown = null;
 
     try {
@@ -333,7 +376,9 @@ KHÔNG được:
       this.logger.error(`Stream error: ${(err as Error)?.message}`, (err as Error)?.stack);
     }
 
-    // Validate sau khi stream xong — nếu fail thì cảnh báo + thay nội dung lưu DB
+    // Validate sau khi stream xong — nếu fail thì cảnh báo + thay nội dung lưu DB.
+    // validEntities === undefined signals knowledge mode (entity rules skip;
+    // PII / leak / price guards still run).
     const validated = this.outputValidator.validate(fullContent, {
       validEntities: validation?.validEntities,
       intent,
@@ -345,23 +390,24 @@ KHÔNG được:
       }
     }
 
-    const finalContent = validated;
-    const inputTokens = messages.reduce(
-      (sum, m) =>
-        sum + Math.ceil((typeof (m as LLMMessage).content === 'string' ? (m as LLMMessage).content.length : 0) / 4),
-      0,
-    );
-    const outputTokens = Math.ceil(finalContent.length / 4);
+    const outputTokens = Math.ceil(validated.length / 4);
+    const totalTokens = inputTokens + outputTokens;
 
-    await this.sessionService.saveAssistantMessage(sessionId, finalContent, {
+    await this.sessionService.saveAssistantMessage(sessionId, validated, {
       intent,
-      tokensUsed: inputTokens + outputTokens,
+      tokensUsed: totalTokens,
       modelUsed: model,
       toolsCalled,
     });
+    this.rateLimitService.recordTokenUsage(sessionId, totalTokens);
 
-    this.rateLimitService.recordTokenUsage(sessionId, inputTokens + outputTokens);
-    await this.maybeSummarize(sessionId, messages.filter((m): m is LLMMessage => m.role !== 'tool'));
+    // Summarization is best-effort and adds 200-2000ms to the LLM round-trip.
+    // Fire-and-forget — the next /ask call will see the summary once it lands.
+    // Errors are already swallowed inside maybeSummarize.
+    void this.maybeSummarize(
+      sessionId,
+      messages.filter((m): m is LLMMessage => m.role !== 'tool'),
+    );
 
     if (streamError) throw streamError;
   }
@@ -487,3 +533,17 @@ KHÔNG được:
 }
 
 const SLIDING_WINDOW_FOR_SUMMARY = 8;
+
+/**
+ * Cheap ~4-chars-per-token estimate over the message stream. Hoisted out of
+ * streamAndSave so we compute it ONCE before streaming starts instead of
+ * after — the messages array is frozen for the duration of one ask().
+ */
+function estimateMessagesTokens(messages: LLMConversationMessage[]): number {
+  let chars = 0;
+  for (const m of messages) {
+    const c = (m as LLMMessage).content;
+    if (typeof c === 'string') chars += c.length;
+  }
+  return Math.ceil(chars / 4);
+}
