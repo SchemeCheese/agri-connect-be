@@ -31,7 +31,7 @@ export class PaymentsService {
     const accessKey = process.env.MOMO_ACCESS_KEY;
     const secretKey = process.env.MOMO_SECRET_KEY;
     const endpoint = process.env.MOMO_ENDPOINT || 'https://test-payment.momo.vn/v2/gateway/api/create';
-    const redirectUrl = process.env.MOMO_REDIRECT_URL || 'http://localhost:3000/payment-result';
+    const redirectUrl = process.env.MOMO_REDIRECT_URL || 'http://localhost:3001/payments/momo/return';
     const ipnUrl = process.env.MOMO_IPN_URL || 'https://patrice-viscous-addilyn.ngrok-free.dev/payments/momo/ipn';
 
     if (!partnerCode || !accessKey || !secretKey) {
