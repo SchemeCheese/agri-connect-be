@@ -32,7 +32,7 @@ export class PaymentsService {
     const secretKey = process.env.MOMO_SECRET_KEY;
     const endpoint = process.env.MOMO_ENDPOINT || 'https://test-payment.momo.vn/v2/gateway/api/create';
     const redirectUrl = process.env.MOMO_REDIRECT_URL || 'http://localhost:3000/payment-result';
-    const ipnUrl = process.env.MOMO_IPN_URL || 'http://localhost:3001/payments/momo/ipn';
+    const ipnUrl = process.env.MOMO_IPN_URL || 'https://patrice-viscous-addilyn.ngrok-free.dev/payments/momo/ipn';
 
     if (!partnerCode || !accessKey || !secretKey) {
       throw new BadRequestException('Chưa cấu hình biến môi trường MoMo (MOMO_PARTNER_CODE, MOMO_ACCESS_KEY, MOMO_SECRET_KEY)');
@@ -138,28 +138,200 @@ export class PaymentsService {
 
     // Only process success once
     if (ipn.resultCode === 0) {
-      await this.db.$transaction(async (tx) => {
-        const payment = await tx.payment.findFirst({ where: { order_id: ipn.orderId } });
-        if (!payment) throw new NotFoundException('Payment not found');
-
-        if (payment.status !== PaymentStatus.PAID) {
-          await tx.payment.update({
-            where: { id: payment.id },
-            data: {
-              status: PaymentStatus.PAID,
-              transaction_ref: ipn.transId,
-            },
-          });
-
-          await tx.order.update({
-            where: { id: ipn.orderId },
-            data: { status: OrderStatus.CONFIRMED },
-          });
-        }
-      });
+      await this.markPaymentSucceeded(ipn.orderId, ipn.transId);
     }
 
     return { resultCode: 0, message: 'OK' };
+  }
+
+  /**
+   * MoMo browser-redirect ("Return URL") handler.
+   *
+   * Difference vs handleMomoIpn:
+   *  - IPN is a POST from MoMo's server, signed with HMAC over a fixed field list.
+   *  - Return is a GET MoMo redirects the BUYER'S BROWSER to. MoMo includes the
+   *    same fields as query string with a signature MoMo computes.
+   *
+   * Why we still update DB here (in addition to IPN):
+   *  - IPN sometimes lags 1–10s. The buyer is staring at the screen — we want
+   *    to flip Order.CONFIRMED before the redirect target loads so /payment/success
+   *    can render the truth.
+   *  - markPaymentSucceeded is idempotent (early-return if already PAID), so if
+   *    IPN beats the return, this is a no-op; if return beats IPN, IPN is a no-op.
+   *
+   * Returns the FE URL to 302-redirect the buyer to. Caller (controller) does the redirect.
+   */
+  async handleMomoReturn(query: Record<string, string>): Promise<string> {
+    const feBase = process.env.FRONTEND_URL || 'http://localhost:3000';
+    const orderId = query.orderId;
+    if (!orderId) return `${feBase}/payment/failed?reason=missing_orderId`;
+
+    const { accessKey, secretKey, partnerCode } = this.getMomoConfig();
+    if (query.partnerCode && query.partnerCode !== partnerCode) {
+      this.logger.warn(`Return partnerCode mismatch: ${query.partnerCode}`);
+      return `${feBase}/payment/failed?orderId=${orderId}&reason=partner_mismatch`;
+    }
+
+    // MoMo signs return-URL fields in the same alphabetical order as the request
+    // create signature, sans signature itself.
+    const rawSignature =
+      `accessKey=${accessKey}&amount=${query.amount ?? ''}&extraData=${query.extraData ?? ''}` +
+      `&message=${query.message ?? ''}&orderId=${orderId}&orderInfo=${query.orderInfo ?? ''}` +
+      `&orderType=${query.orderType ?? ''}&partnerCode=${query.partnerCode ?? partnerCode}` +
+      `&payType=${query.payType ?? ''}&requestId=${query.requestId ?? ''}` +
+      `&responseTime=${query.responseTime ?? ''}&resultCode=${query.resultCode ?? ''}` +
+      `&transId=${query.transId ?? ''}`;
+    const expected = this.signMomoRequest(rawSignature, secretKey);
+
+    // Signature mismatch on return is treated as soft failure — we still redirect
+    // (don't 500 the buyer) but log it so we notice tampering / bad config.
+    if (query.signature && expected !== query.signature) {
+      this.logger.warn(`MoMo return signature mismatch for order ${orderId}`);
+    }
+
+    const resultCode = Number(query.resultCode ?? -1);
+    if (resultCode === 0 && query.transId) {
+      try {
+        await this.markPaymentSucceeded(orderId, query.transId);
+      } catch (err) {
+        // If Payment row not found yet (very unusual race), let IPN handle it.
+        this.logger.warn(`markPaymentSucceeded from return failed for ${orderId}: ${(err as Error).message}`);
+      }
+      return `${feBase}/payment/success?orderId=${orderId}&transId=${encodeURIComponent(query.transId)}&amount=${encodeURIComponent(query.amount ?? '')}`;
+    }
+
+    return `${feBase}/payment/failed?orderId=${orderId}&resultCode=${resultCode}&message=${encodeURIComponent(query.message ?? '')}`;
+  }
+
+  /**
+   * Single source of truth for "this MoMo payment cleared":
+   *  - Payment.status → PAID
+   *  - Payment.transaction_ref → transId (used later by refundMomoTransaction)
+   *  - Order.status → CONFIRMED
+   * Atomic in one $transaction. Idempotent — early-return if already PAID.
+   * Called by handleMomoIpn (real callback) AND by simulateMomoSuccess (dev tool).
+   */
+  private async markPaymentSucceeded(orderId: string, transId: string) {
+    await this.db.$transaction(async (tx) => {
+      const payment = await tx.payment.findFirst({ where: { order_id: orderId } });
+      if (!payment) throw new NotFoundException('Payment not found');
+      if (payment.status === PaymentStatus.PAID) return; // idempotent
+
+      await tx.payment.update({
+        where: { id: payment.id },
+        data: { status: PaymentStatus.PAID, transaction_ref: transId },
+      });
+      await tx.order.update({
+        where: { id: orderId },
+        data: { status: OrderStatus.CONFIRMED },
+      });
+    });
+  }
+
+  private requireDevSimulator() {
+    // Hard fail in production. Even when NODE_ENV !== 'production', require
+    // MOMO_DEV_SIMULATOR=true so the endpoint isn't accidentally callable
+    // from a staging deploy.
+    if (process.env.NODE_ENV === 'production') {
+      throw new ForbiddenException('Dev simulator bị tắt trong production.');
+    }
+    if (process.env.MOMO_DEV_SIMULATOR !== 'true') {
+      throw new ForbiddenException(
+        'Dev simulator chưa được bật. Set MOMO_DEV_SIMULATOR=true trong BE/.env.',
+      );
+    }
+  }
+
+  /**
+   * DEV ONLY — giả lập IPN thành công không cần MoMo gọi callback thật.
+   * Cùng atomic transaction với real IPN, ownership check tránh buyer khác gọi
+   * lên đơn của bạn. transId được sinh giả ngắn để dễ phân biệt với MoMo thật
+   * (có prefix "DEV-") nếu sau này cần audit.
+   */
+  async simulateMomoSuccess(buyerId: string, orderId: string) {
+    this.requireDevSimulator();
+
+    const order = await this.db.order.findUnique({
+      where: { id: orderId },
+      include: { payments: true },
+    });
+    if (!order) throw new NotFoundException('Đơn hàng không tồn tại');
+    if (order.buyer_id !== buyerId) {
+      throw new ForbiddenException('Bạn không sở hữu đơn hàng này');
+    }
+    if (order.payment_method !== PaymentMethod.MOMO) {
+      throw new BadRequestException('Đơn này không thanh toán bằng MoMo');
+    }
+
+    const fakeTransId = `DEV-${Date.now()}`;
+    await this.markPaymentSucceeded(orderId, fakeTransId);
+
+    this.logger.warn(
+      `[DEV-SIMULATOR] Marked order ${orderId} as PAID without real MoMo callback. transId=${fakeTransId}`,
+    );
+
+    return {
+      message: 'Đã giả lập thanh toán MoMo thành công.',
+      orderId,
+      transId: fakeTransId,
+      paymentStatus: PaymentStatus.PAID,
+      orderStatus: OrderStatus.CONFIRMED,
+    };
+  }
+
+  /**
+   * DEV ONLY — giả lập IPN báo lỗi (resultCode != 0).
+   * Đặt Payment=FAILED, KHÔNG đổi Order.status (vẫn ở PENDING để buyer retry).
+   */
+  async simulateMomoFailure(buyerId: string, orderId: string, reason = 'DEV: simulated failure') {
+    this.requireDevSimulator();
+
+    const order = await this.db.order.findUnique({
+      where: { id: orderId },
+      include: { payments: true },
+    });
+    if (!order) throw new NotFoundException('Đơn hàng không tồn tại');
+    if (order.buyer_id !== buyerId) {
+      throw new ForbiddenException('Bạn không sở hữu đơn hàng này');
+    }
+
+    await this.db.payment.updateMany({
+      where: { order_id: orderId },
+      data: { status: PaymentStatus.FAILED },
+    });
+
+    this.logger.warn(`[DEV-SIMULATOR] Marked payment FAILED for order ${orderId}: ${reason}`);
+
+    return {
+      message: 'Đã giả lập thanh toán MoMo thất bại.',
+      orderId,
+      paymentStatus: PaymentStatus.FAILED,
+      orderStatus: order.status,
+    };
+  }
+
+  /**
+   * Trạng thái Payment + Order — dùng cho FE polling trên trang checkout sau khi
+   * buyer click "Mở MoMo". Khi Payment.status === PAID, FE đóng popup và redirect.
+   * KHÔNG gated bằng dev simulator — đây là path bình thường để FE biết IPN đã về.
+   */
+  async getMomoPaymentStatus(buyerId: string, orderId: string) {
+    const order = await this.db.order.findUnique({
+      where: { id: orderId },
+      include: { payments: true },
+    });
+    if (!order) throw new NotFoundException('Đơn hàng không tồn tại');
+    if (order.buyer_id !== buyerId) {
+      throw new ForbiddenException('Bạn không sở hữu đơn hàng này');
+    }
+    const payment = order.payments?.[0];
+    return {
+      orderId,
+      paymentStatus: payment?.status ?? null,
+      orderStatus: order.status,
+      transactionRef: payment?.transaction_ref ?? null,
+      amount: Number(order.final_total_price),
+    };
   }
 
   /**

@@ -1,4 +1,5 @@
-import { Injectable, BadRequestException, NotFoundException, ForbiddenException } from '@nestjs/common';
+import { Injectable, BadRequestException, NotFoundException, ForbiddenException, Logger } from '@nestjs/common';
+import { Cron, CronExpression } from '@nestjs/schedule';
 import { DatabaseService } from '../../database/database.service';
 import { EmailService } from '../../communication/email/email.service';
 import { PaymentsService } from '../payments/payments.service';
@@ -9,9 +10,13 @@ import { OrderStatus, PaymentStatus, PaymentMethod } from '@prisma/client';
 const REPORT_ISSUE_DELAY_DAYS = 3;
 // Cửa sổ tranh chấp 3 ngày sau khi đơn được xác nhận DELIVERED (COMPLETED).
 const POST_DELIVERY_DISPUTE_WINDOW_DAYS = 3;
+// Đơn MoMo chờ thanh toán quá ngưỡng này sẽ bị cron tự cancel.
+const UNPAID_MOMO_ORDER_TIMEOUT_HOURS = 24;
 
 @Injectable()
 export class OrdersService {
+    private readonly logger = new Logger(OrdersService.name);
+
     constructor(
         private readonly databaseService: DatabaseService,
         private readonly emailService: EmailService,
@@ -707,6 +712,110 @@ export class OrdersService {
             where: { id: orderId },
             data: { status: OrderStatus.CANCELLED },
         });
+    }
+
+    // =====================================================
+    // BUYER: Đổi phương thức thanh toán cho đơn còn UNPAID
+    //
+    // Use case: buyer chọn MoMo lúc checkout nhưng không thanh toán → muốn chuyển
+    // sang COD để đơn được xử lý ngay thay vì bị cron tự huỷ sau 24h.
+    // Constraints:
+    //   - Order.status phải là PENDING (chưa seller-confirm).
+    //   - Payment.status phải là UNPAID (chưa từng PAID — không refund halfway).
+    //   - Chỉ cho phép chuyển TỚI COD (đơn giản hoá; mở rộng sau nếu cần).
+    // Cả 2 update nằm trong cùng $transaction để Order.payment_method và
+    // Payment.payment_method không lệch nhau.
+    // =====================================================
+    async changePaymentMethod(
+        buyerId: string,
+        orderId: string,
+        newMethod: PaymentMethod,
+    ) {
+        const order = await this.databaseService.order.findUnique({
+            where: { id: orderId },
+            include: { payments: true },
+        });
+        if (!order) throw new NotFoundException(`Đơn hàng #${orderId} không tồn tại.`);
+        if (order.buyer_id !== buyerId) {
+            throw new ForbiddenException('Bạn không có quyền sửa đơn này.');
+        }
+        if (order.status !== OrderStatus.PENDING) {
+            throw new BadRequestException(
+                `Chỉ đổi được phương thức khi đơn ở trạng thái PENDING. Hiện tại: ${order.status}`,
+            );
+        }
+        const payment = order.payments?.[0];
+        if (payment && payment.status !== PaymentStatus.UNPAID) {
+            throw new BadRequestException(
+                `Đơn đã có giao dịch ở trạng thái ${payment.status} — không thể đổi phương thức.`,
+            );
+        }
+        if (newMethod !== PaymentMethod.COD) {
+            throw new BadRequestException(
+                'Hiện chỉ hỗ trợ đổi sang COD. Để thanh toán online, vui lòng huỷ và đặt lại đơn.',
+            );
+        }
+        if (order.payment_method === newMethod) {
+            return { message: 'Phương thức đã là COD, không thay đổi gì.', orderId };
+        }
+
+        await this.databaseService.$transaction([
+            this.databaseService.order.update({
+                where: { id: orderId },
+                data: { payment_method: newMethod },
+            }),
+            this.databaseService.payment.updateMany({
+                where: { order_id: orderId },
+                data: { payment_method: newMethod },
+            }),
+        ]);
+
+        return {
+            message: 'Đã chuyển sang thanh toán khi nhận hàng (COD). Người bán sẽ xác nhận đơn.',
+            orderId,
+            payment_method: newMethod,
+        };
+    }
+
+    // =====================================================
+    // CRON: tự huỷ đơn MoMo chưa thanh toán quá 24h
+    //
+    // Chạy mỗi giờ. Tìm Order(status=PENDING, payment_method=MOMO,
+    // created_at < now - 24h) có Payment(status=UNPAID) → flip
+    // Order=CANCELLED + Payment=FAILED trong $transaction.
+    // =====================================================
+    @Cron(CronExpression.EVERY_HOUR)
+    async cancelStaleUnpaidMomoOrders() {
+        const cutoff = new Date(Date.now() - UNPAID_MOMO_ORDER_TIMEOUT_HOURS * 60 * 60 * 1000);
+
+        const stale = await this.databaseService.order.findMany({
+            where: {
+                status: OrderStatus.PENDING,
+                payment_method: PaymentMethod.MOMO,
+                created_at: { lt: cutoff },
+                payments: { some: { status: PaymentStatus.UNPAID } },
+            },
+            select: { id: true },
+        });
+
+        if (stale.length === 0) {
+            this.logger.debug(`[cron] No stale unpaid MoMo orders.`);
+            return;
+        }
+
+        const ids = stale.map((o) => o.id);
+        await this.databaseService.$transaction([
+            this.databaseService.order.updateMany({
+                where: { id: { in: ids } },
+                data: { status: OrderStatus.CANCELLED },
+            }),
+            this.databaseService.payment.updateMany({
+                where: { order_id: { in: ids }, status: PaymentStatus.UNPAID },
+                data: { status: PaymentStatus.FAILED },
+            }),
+        ]);
+
+        this.logger.log(`[cron] Auto-cancelled ${ids.length} unpaid MoMo orders older than ${UNPAID_MOMO_ORDER_TIMEOUT_HOURS}h: ${ids.join(', ')}`);
     }
 
     // =====================================================

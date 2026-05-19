@@ -1,4 +1,5 @@
-import { Controller, Post, Patch, Body, UseGuards, Request, Get, Param, ForbiddenException } from '@nestjs/common';
+import { Controller, Post, Patch, Body, UseGuards, Request, Get, Param, ForbiddenException, BadRequestException } from '@nestjs/common';
+import { PaymentMethod } from '@prisma/client';
 import { OrdersService } from './orders.service';
 import { PaymentsService } from '../payments/payments.service';
 import { DatabaseService } from '../../database/database.service';
@@ -126,6 +127,21 @@ export class OrdersController {
     @Patch(':id/cancel')
     async cancelBySeller(@Request() req, @Param('id') orderId: string, @Body() dto: CancelOrderDto) {
         return this.ordersService.cancelOrderBySeller(req.user.sub, orderId, dto.reason);
+    }
+
+    // ─── BUYER: Đổi phương thức thanh toán (MOMO → COD khi chưa thanh toán) ──
+    @UseGuards(RolesGuard)
+    @Roles(UserRole.BUYER)
+    @Patch(':id/change-payment-method')
+    async changePaymentMethod(
+        @Request() req,
+        @Param('id') orderId: string,
+        @Body() body: { payment_method: PaymentMethod },
+    ) {
+        if (!body?.payment_method) {
+            throw new BadRequestException('Thiếu payment_method trong body.');
+        }
+        return this.ordersService.changePaymentMethod(req.user.sub, orderId, body.payment_method);
     }
 
     // ─── BUYER: Tự hủy đơn  PENDING → CANCELLED ──────────────────────────────
