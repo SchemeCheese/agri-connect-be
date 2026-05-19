@@ -17,10 +17,13 @@ enum OrderStatus {
   PENDING          // Chờ người bán xác nhận
   CONFIRMED        // Người bán đã xác nhận
   SHIPPING         // Đang giao hàng
-  COMPLETED        // Hoàn thành (buyer xác nhận nhận)
+  COMPLETED        // Hoàn thành (buyer xác nhận nhận) — alias cho DELIVERED
   CANCELLED        // Đã hủy
-  ISSUE_REPORTED   // Có sự cố (buyer báo chưa nhận)
+  ISSUE_REPORTED   // Có sự cố (buyer báo chưa nhận) — DISPUTED state
   FAILED           // Giao thất bại (sau khi seller xác nhận)
+  RETURNED         // Đơn COD báo "chưa nhận hàng" — không có tiền để hoàn
+  REFUND_PENDING   // Đơn MoMo đã PAID, đang chờ admin/job gọi MoMo refund API
+  REFUNDED         // MoMo refund API trả thành công, tiền đã trả về buyer
 }
 
 enum PaymentStatus {

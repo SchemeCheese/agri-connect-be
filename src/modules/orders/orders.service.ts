@@ -1,17 +1,21 @@
 import { Injectable, BadRequestException, NotFoundException, ForbiddenException } from '@nestjs/common';
 import { DatabaseService } from '../../database/database.service';
 import { EmailService } from '../../communication/email/email.service';
+import { PaymentsService } from '../payments/payments.service';
 import { CreateOrderDto } from './dtos/create-order.dto';
 import { OrderStatus, PaymentStatus, PaymentMethod } from '@prisma/client';
 
-// Số ngày sau khi giao hàng buyer mới được phép báo sự cố
+// Số ngày sau khi giao hàng buyer mới được phép báo sự cố (SHIPPING overdue window)
 const REPORT_ISSUE_DELAY_DAYS = 3;
+// Cửa sổ tranh chấp 3 ngày sau khi đơn được xác nhận DELIVERED (COMPLETED).
+const POST_DELIVERY_DISPUTE_WINDOW_DAYS = 3;
 
 @Injectable()
 export class OrdersService {
     constructor(
         private readonly databaseService: DatabaseService,
         private readonly emailService: EmailService,
+        private readonly paymentsService: PaymentsService,
     ) { }
 
     async checkout(buyerId: string, dto: CreateOrderDto) {
@@ -476,6 +480,110 @@ export class OrdersService {
             message: 'Đã báo sự cố thành công. Người bán sẽ được thông báo để xác nhận.',
             data: updated,
         };
+    }
+
+    // =====================================================
+    // BUYER: "Tôi chưa nhận được hàng" — refund/dispute flow
+    //
+    // Rule 1 (COD):       Order → RETURNED. Payment giữ UNPAID (no money to refund).
+    // Rule 2 (validation): SHIPPING quá REPORT_ISSUE_DELAY_DAYS từ shipped_at, HOẶC
+    //                      COMPLETED trong POST_DELIVERY_DISPUTE_WINDOW_DAYS từ updated_at.
+    //                      Mọi trạng thái khác → 400.
+    // Rule 3 (MoMo paid): Order → REFUND_PENDING, Payment → REFUNDING.
+    //                      Đợi admin gọi /orders/:id/refund (Rule 4) hoặc auto-refund.
+    // Rule 4 (refund exec): xem PaymentsService.refundMomoTransaction.
+    //
+    // Tất cả update Order + Payment đều nằm trong cùng $transaction.
+    // =====================================================
+    async reportItemNotReceived(buyerId: string, orderId: string, note?: string) {
+        const order = await this.databaseService.order.findUnique({
+            where: { id: orderId },
+            include: {
+                buyer: { select: { id: true, full_name: true, email: true } },
+                seller: { select: { id: true, full_name: true, email: true } },
+                payments: true,
+            },
+        });
+        if (!order) throw new NotFoundException(`Đơn hàng #${orderId} không tồn tại.`);
+        if (order.buyer_id !== buyerId) {
+            throw new ForbiddenException('Bạn không có quyền báo sự cố đơn hàng này.');
+        }
+
+        // ── Rule 2: validation ─────────────────────────────────────────────
+        const now = Date.now();
+        const dayMs = 1000 * 60 * 60 * 24;
+        let allowed = false;
+        if (order.status === OrderStatus.SHIPPING) {
+            const ref = (order.shipped_at ?? order.updated_at).getTime();
+            if ((now - ref) / dayMs >= REPORT_ISSUE_DELAY_DAYS) allowed = true;
+        } else if (order.status === OrderStatus.COMPLETED) {
+            const ref = order.updated_at.getTime();
+            if ((now - ref) / dayMs <= POST_DELIVERY_DISPUTE_WINDOW_DAYS) allowed = true;
+        }
+        if (!allowed) {
+            throw new BadRequestException(
+                `Không thể báo "chưa nhận hàng" cho đơn ở trạng thái ${order.status}. ` +
+                `Chỉ áp dụng khi SHIPPING quá ${REPORT_ISSUE_DELAY_DAYS} ngày, ` +
+                `hoặc COMPLETED trong vòng ${POST_DELIVERY_DISPUTE_WINDOW_DAYS} ngày.`,
+            );
+        }
+
+        const issueNote = note ?? 'Người mua báo chưa nhận được hàng.';
+        const isCod = order.payment_method === PaymentMethod.COD;
+        const isMomo = order.payment_method === PaymentMethod.MOMO;
+        const payment = order.payments?.[0];
+        const paymentAlreadyPaid = payment?.status === PaymentStatus.PAID;
+
+        // ── Rule 1 (COD): no money moved, just mark RETURNED ───────────────
+        if (isCod) {
+            await this.databaseService.$transaction(async (tx) => {
+                await tx.order.update({
+                    where: { id: orderId },
+                    data: { status: OrderStatus.RETURNED, note: issueNote },
+                });
+                await tx.payment.updateMany({
+                    where: { order_id: orderId },
+                    data: { status: PaymentStatus.FAILED },
+                });
+            });
+            return { message: 'Đơn COD đã được đánh dấu RETURNED. Không phát sinh hoàn tiền.' };
+        }
+
+        // ── Rule 3 (MoMo prepaid): queue for refund ────────────────────────
+        if (isMomo && paymentAlreadyPaid) {
+            await this.databaseService.$transaction(async (tx) => {
+                await tx.order.update({
+                    where: { id: orderId },
+                    data: { status: OrderStatus.REFUND_PENDING, note: issueNote },
+                });
+                await tx.payment.updateMany({
+                    where: { order_id: orderId },
+                    data: { status: PaymentStatus.REFUNDING },
+                });
+            });
+            // Note: admin endpoint /orders/:id/refund will execute Rule 4.
+            // To auto-refund instead, uncomment:
+            //   await this.paymentsService.refundMomoTransaction(orderId, Number(order.final_total_price), issueNote);
+            return {
+                message: 'Đã ghi nhận tranh chấp MoMo. Đơn chuyển sang REFUND_PENDING, hệ thống sẽ hoàn tiền.',
+            };
+        }
+
+        // ── Other prepaid (QR_CODE/ZALOPAY) or MoMo-but-not-paid ───────────
+        // Fallback to legacy ISSUE_REPORTED + REFUNDING flow.
+        await this.databaseService.$transaction(async (tx) => {
+            await tx.order.update({
+                where: { id: orderId },
+                data: { status: OrderStatus.ISSUE_REPORTED, note: issueNote },
+            });
+            if (paymentAlreadyPaid) {
+                await tx.payment.updateMany({
+                    where: { order_id: orderId },
+                    data: { status: PaymentStatus.REFUNDING },
+                });
+            }
+        });
+        return { message: 'Đã ghi nhận sự cố, đang chờ xử lý.' };
     }
 
     // =====================================================

@@ -1,5 +1,7 @@
-import { Controller, Post, Patch, Body, UseGuards, Request, Get, Param } from '@nestjs/common';
+import { Controller, Post, Patch, Body, UseGuards, Request, Get, Param, ForbiddenException } from '@nestjs/common';
 import { OrdersService } from './orders.service';
+import { PaymentsService } from '../payments/payments.service';
+import { DatabaseService } from '../../database/database.service';
 import { CreateOrderDto } from './dtos/create-order.dto';
 import { CancelOrderDto } from './dtos/cancel-order.dto';
 import { ReportIssueDto } from './dtos/report-issue.dto';
@@ -11,7 +13,11 @@ import { UserRole } from '../auth/decorators/roles.decorator';
 @Controller('orders')
 @UseGuards(JwtAuthGuard)
 export class OrdersController {
-    constructor(private readonly ordersService: OrdersService) { }
+    constructor(
+        private readonly ordersService: OrdersService,
+        private readonly paymentsService: PaymentsService,
+        private readonly databaseService: DatabaseService,
+    ) { }
 
     // ─── BUYER: Đặt hàng ─────────────────────────────────────────────────────
     @UseGuards(RolesGuard)
@@ -70,6 +76,41 @@ export class OrdersController {
         @Body() dto: ReportIssueDto,
     ) {
         return this.ordersService.reportIssue(req.user.sub, orderId, dto?.note);
+    }
+
+    // ─── BUYER: "Tôi chưa nhận được hàng" — refund/dispute flow ─────────────
+    // Rule 1 (COD)        → Order=RETURNED, no refund call.
+    // Rule 2 (validation) → SHIPPING > 3 ngày từ shipped_at, hoặc COMPLETED < 3 ngày từ updated_at.
+    // Rule 3 (MoMo paid)  → Order=REFUND_PENDING + Payment=REFUNDING, đợi admin gọi /refund.
+    @UseGuards(RolesGuard)
+    @Roles(UserRole.BUYER)
+    @Patch(':id/not-received')
+    async reportNotReceived(
+        @Request() req,
+        @Param('id') orderId: string,
+        @Body() dto: ReportIssueDto,
+    ) {
+        return this.ordersService.reportItemNotReceived(req.user.sub, orderId, dto?.note);
+    }
+
+    // ─── ADMIN: Thực thi hoàn tiền MoMo (Rule 4) ─────────────────────────────
+    // POST /orders/:id/refund — gọi MoMo refund API, Order=REFUNDED + Payment=REFUNDED.
+    // Yêu cầu req.user.is_admin === true. Body có thể override amount; mặc định lấy final_total_price.
+    @Post(':id/refund')
+    async adminRefund(
+        @Request() req,
+        @Param('id') orderId: string,
+        @Body() body: { amount?: number; reason?: string },
+    ) {
+        if (!req.user?.is_admin) {
+            throw new ForbiddenException('Chỉ admin được phép thực thi hoàn tiền.');
+        }
+        const order = await this.databaseService.order.findUnique({
+            where: { id: orderId },
+            select: { final_total_price: true },
+        });
+        const amount = body?.amount ?? Number(order?.final_total_price ?? 0);
+        return this.paymentsService.refundMomoTransaction(orderId, amount, body?.reason);
     }
 
     // ─── SELLER: Xác nhận hàng thất lạc  ISSUE_REPORTED → FAILED ────────────

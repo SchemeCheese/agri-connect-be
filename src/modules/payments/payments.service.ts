@@ -161,4 +161,95 @@ export class PaymentsService {
 
     return { resultCode: 0, message: 'OK' };
   }
+
+  /**
+   * Calls MoMo's /v2/gateway/api/refund.
+   *
+   * Signed string (alphabetically sorted, NO signature field inside):
+   *   accessKey=...&amount=...&description=...&orderId=...&partnerCode=...&requestId=...&transId=...
+   *
+   * Important:
+   *  - `orderId` sent to MoMo MUST be NEW per refund attempt (MoMo dedupes).
+   *    We use `<originalOrderId>-rfd-<timestamp>`.
+   *  - `transId` is the ORIGINAL purchase transId persisted into Payment.transaction_ref
+   *    by handleMomoIpn().
+   *  - DB writes wrap in a Prisma $transaction so Payment.status and Order.status
+   *    flip together (REFUNDED).
+   */
+  async refundMomoTransaction(orderId: string, amount: number, reason = 'Buyer not received') {
+    const { partnerCode, accessKey, secretKey, endpoint } = this.getMomoConfig();
+    const refundEndpoint =
+      process.env.MOMO_REFUND_ENDPOINT || endpoint.replace('/create', '/refund');
+
+    const payment = await this.db.payment.findFirst({
+      where: { order_id: orderId, payment_method: PaymentMethod.MOMO },
+    });
+    if (!payment) throw new NotFoundException('Không tìm thấy giao dịch MoMo cho đơn này.');
+    if (payment.status === PaymentStatus.REFUNDED) {
+      return { message: 'Đơn đã được hoàn tiền trước đó.', alreadyRefunded: true };
+    }
+    if (payment.status !== PaymentStatus.PAID && payment.status !== PaymentStatus.REFUNDING) {
+      throw new BadRequestException(
+        `Chỉ hoàn tiền được khi Payment ở trạng thái PAID/REFUNDING. Hiện tại: ${payment.status}`,
+      );
+    }
+    if (!payment.transaction_ref) {
+      throw new BadRequestException('Thiếu transId gốc — không thể gọi MoMo refund.');
+    }
+
+    const refundOrderId = `${orderId}-rfd-${Date.now()}`;
+    const requestId = `${Date.now()}`;
+    const description = reason;
+    const refundAmount = Math.floor(amount); // MoMo requires integer VND
+
+    const rawSignature =
+      `accessKey=${accessKey}&amount=${refundAmount}&description=${description}` +
+      `&orderId=${refundOrderId}&partnerCode=${partnerCode}` +
+      `&requestId=${requestId}&transId=${payment.transaction_ref}`;
+    const signature = this.signMomoRequest(rawSignature, secretKey);
+
+    const payload = {
+      partnerCode,
+      orderId: refundOrderId,
+      requestId,
+      amount: refundAmount,
+      transId: Number(payment.transaction_ref),
+      lang: 'vi',
+      description,
+      signature,
+    };
+
+    const { data } = await axios.post(refundEndpoint, payload, {
+      headers: { 'Content-Type': 'application/json' },
+      timeout: 15000,
+    });
+
+    // MoMo: resultCode === 0 → refund accepted.
+    // Anything else: leave Payment at REFUNDING so admin can retry; do NOT mark REFUNDED.
+    if (data?.resultCode !== 0) {
+      this.logger.error(`MoMo refund fail (order ${orderId}): ${JSON.stringify(data)}`);
+      throw new BadRequestException(data?.message || 'MoMo từ chối yêu cầu hoàn tiền.');
+    }
+
+    await this.db.$transaction(async (tx) => {
+      await tx.payment.update({
+        where: { id: payment.id },
+        data: {
+          status: PaymentStatus.REFUNDED,
+          transaction_ref: `${payment.transaction_ref}|refund:${data.transId ?? refundOrderId}`,
+        },
+      });
+      await tx.order.update({
+        where: { id: orderId },
+        data: { status: OrderStatus.REFUNDED },
+      });
+    });
+
+    return {
+      message: 'Hoàn tiền MoMo thành công.',
+      refundTransId: data.transId,
+      refundOrderId,
+      amount: refundAmount,
+    };
+  }
 }
