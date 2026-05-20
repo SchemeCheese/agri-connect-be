@@ -32,10 +32,13 @@ export class PaymentsService {
     const secretKey = process.env.MOMO_SECRET_KEY;
     const endpoint = process.env.MOMO_ENDPOINT || 'https://test-payment.momo.vn/v2/gateway/api/create';
     const redirectUrl = process.env.MOMO_REDIRECT_URL || 'http://localhost:3001/payments/momo/return';
-    const ipnUrl = process.env.MOMO_IPN_URL || 'https://patrice-viscous-addilyn.ngrok-free.dev/payments/momo/ipn';
+    const ipnUrl = process.env.MOMO_IPN_URL;
 
     if (!partnerCode || !accessKey || !secretKey) {
       throw new BadRequestException('Chưa cấu hình biến môi trường MoMo (MOMO_PARTNER_CODE, MOMO_ACCESS_KEY, MOMO_SECRET_KEY)');
+    }
+    if (!ipnUrl) {
+      throw new BadRequestException('Thiếu cấu hình MOMO_IPN_URL — set biến môi trường này tới URL public (ví dụ ngrok https://xxx.ngrok-free.app/payments/momo/ipn)');
     }
 
     return { partnerCode, accessKey, secretKey, endpoint, redirectUrl, ipnUrl };
@@ -67,6 +70,9 @@ export class PaymentsService {
     const amount = Number(payment.amount);
     const { partnerCode, accessKey, secretKey, endpoint, redirectUrl, ipnUrl } = this.getMomoConfig();
 
+    // MoMo dedupe theo orderId — phải unique mỗi lần gen QR. Order.id là CUID
+    // (không chứa dấu '-'), nên IPN/return chỉ cần split('-')[0] để lấy lại original.
+    const momoOrderId = `${orderId}-${Date.now()}`;
     const requestId = `${Date.now()}`;
     const orderInfo = `Thanh toan don hang ${orderId}`;
     const requestType = 'captureWallet';
@@ -74,7 +80,7 @@ export class PaymentsService {
 
     const rawSignature =
       `accessKey=${accessKey}&amount=${amount}&extraData=${extraData}&ipnUrl=${ipnUrl}` +
-      `&orderId=${orderId}&orderInfo=${orderInfo}&partnerCode=${partnerCode}` +
+      `&orderId=${momoOrderId}&orderInfo=${orderInfo}&partnerCode=${partnerCode}` +
       `&redirectUrl=${redirectUrl}&requestId=${requestId}&requestType=${requestType}`;
 
     const signature = this.signMomoRequest(rawSignature, secretKey);
@@ -84,7 +90,7 @@ export class PaymentsService {
       accessKey,
       requestId,
       amount: amount.toString(),
-      orderId,
+      orderId: momoOrderId,
       orderInfo,
       redirectUrl,
       ipnUrl,
@@ -136,9 +142,10 @@ export class PaymentsService {
       throw new BadRequestException('Invalid signature');
     }
 
-    // Only process success once
+    // Only process success once. MoMo orderId is `${dbOrderId}-${ts}` — tách lại id gốc.
     if (ipn.resultCode === 0) {
-      await this.markPaymentSucceeded(ipn.orderId, ipn.transId);
+      const dbOrderId = ipn.orderId.split('-')[0];
+      await this.markPaymentSucceeded(dbOrderId, ipn.transId);
     }
 
     return { resultCode: 0, message: 'OK' };
@@ -163,8 +170,11 @@ export class PaymentsService {
    */
   async handleMomoReturn(query: Record<string, string>): Promise<string> {
     const feBase = process.env.FRONTEND_URL || 'http://localhost:3000';
-    const orderId = query.orderId;
-    if (!orderId) return `${feBase}/payment/failed?reason=missing_orderId`;
+    // MoMo trả về `${dbOrderId}-${ts}` ở query.orderId — tách lại id gốc cho DB lookup
+    // và FE redirect, nhưng giữ nguyên giá trị composite để tính lại signature.
+    const momoOrderId = query.orderId;
+    if (!momoOrderId) return `${feBase}/payment/failed?reason=missing_orderId`;
+    const orderId = momoOrderId.split('-')[0];
 
     const { accessKey, secretKey, partnerCode } = this.getMomoConfig();
     if (query.partnerCode && query.partnerCode !== partnerCode) {
@@ -176,7 +186,7 @@ export class PaymentsService {
     // create signature, sans signature itself.
     const rawSignature =
       `accessKey=${accessKey}&amount=${query.amount ?? ''}&extraData=${query.extraData ?? ''}` +
-      `&message=${query.message ?? ''}&orderId=${orderId}&orderInfo=${query.orderInfo ?? ''}` +
+      `&message=${query.message ?? ''}&orderId=${momoOrderId}&orderInfo=${query.orderInfo ?? ''}` +
       `&orderType=${query.orderType ?? ''}&partnerCode=${query.partnerCode ?? partnerCode}` +
       `&payType=${query.payType ?? ''}&requestId=${query.requestId ?? ''}` +
       `&responseTime=${query.responseTime ?? ''}&resultCode=${query.resultCode ?? ''}` +

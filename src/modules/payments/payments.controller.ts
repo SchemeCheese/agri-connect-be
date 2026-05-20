@@ -1,5 +1,4 @@
-import { Body, Controller, Get, Param, Post, Query, Request, Res, UseGuards } from '@nestjs/common';
-import { Response } from 'express';
+import { Body, Controller, Get, Param, Post, Query, Redirect, Request, UseGuards } from '@nestjs/common';
 import { PaymentsService } from './payments.service';
 import { MomoCreateDto } from './dtos/momo-create.dto';
 import { AuthGuard } from '@nestjs/passport';
@@ -23,17 +22,19 @@ export class PaymentsController {
 
   // MoMo redirect browser của buyer về đây sau khi thanh toán (GET).
   // Service xác nhận signature, idempotent-update DB, trả URL FE để redirect tiếp.
+  // @Redirect() đọc { url } trả về và phát 302 cho trình duyệt.
   @Get('momo/return')
-  async momoReturn(@Query() query: Record<string, string>, @Res() res: Response) {
-    const target = await this.paymentsService.handleMomoReturn(query);
-    return res.redirect(302, target);
+  @Redirect()
+  async momoReturn(@Query() query: Record<string, string>) {
+    const url = await this.paymentsService.handleMomoReturn(query);
+    return { url };
   }
 
   // FE polling trạng thái thanh toán — chạy ngay sau khi mở popup MoMo,
   // tự đóng popup khi paymentStatus = PAID. Không cần gated dev — buyer-only.
   @UseGuards(AuthGuard('jwt'))
-  @Get('momo/status/:orderId')
-  async momoStatus(@Request() req, @Param('orderId') orderId: string) {
+  @Get('momo/status')
+  async momoStatus(@Request() req, @Query('orderId') orderId: string) {
     return this.paymentsService.getMomoPaymentStatus(req.user.sub, orderId);
   }
 

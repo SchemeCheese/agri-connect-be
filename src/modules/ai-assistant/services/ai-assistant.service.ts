@@ -299,13 +299,23 @@ TUYỆT ĐỐI KHÔNG:
 Nếu user hỏi về thứ KHÔNG có trong danh sách → trả lời:
 "Hệ thống chưa có dữ liệu phù hợp. Bạn có thể thử từ khóa khác hoặc xem trực tiếp tại mục Cửa hàng."`
         : `[GROUNDING — NO DATA]
-Tool đã chạy nhưng không trả về kết quả nào. PHẢI trả lời ĐÚNG MẪU:
-"Hệ thống chưa có dữ liệu cho yêu cầu này. Bạn có thể thử với từ khóa khác hoặc xem danh sách tại mục Cửa hàng/Sản phẩm."
+Tool đã chạy và trả về RỖNG. Hệ thống KHÔNG có sản phẩm/cửa hàng nào khớp với yêu cầu của user.
 
-KHÔNG được:
-- Liệt kê bất kỳ tên cửa hàng nào (vì không có data → 100% bịa)
-- Đề xuất "thường thì có thể là..." / "giá thị trường khoảng..."
-- Dùng kiến thức chung về nông sản`;
+BẮT BUỘC: Trả lời CHÍNH XÁC theo mẫu dưới đây, KHÔNG thêm bất kỳ thông tin nào khác:
+
+"Hiện tại trên hệ thống chưa có sản phẩm/cửa hàng phù hợp với yêu cầu của bạn. Bạn có thể thử lại với từ khóa khác, hoặc xem danh sách hiện có tại mục Cửa hàng/Sản phẩm trên Agri-Connect."
+
+TUYỆT ĐỐI CẤM (vi phạm = output bị chặn 100%):
+- Nêu BẤT KỲ con số giá nào (vd: "30.000đ/kg", "khoảng 25k", "giá thị trường ~20k") — KHÔNG CÓ DATA = KHÔNG CÓ GIÁ
+- Nêu BẤT KỲ số lượng tồn kho nào (vd: "còn 200kg", "khoảng 50 phần") — KHÔNG CÓ DATA = KHÔNG CÓ STOCK
+- Nêu BẤT KỲ tên cửa hàng / shop / seller / vựa / nông trại / hợp tác xã nào (vd: "Vựa Gạo Miền Tây", "Nông trại ABC") — KHÔNG CÓ DATA = KHÔNG CÓ TÊN
+- Nêu BẤT KỲ tên sản phẩm cụ thể nào (vd: "cam sành Hà Giang", "gạo ST25") ngoài từ khóa user vừa hỏi
+- Nêu địa chỉ, số điện thoại, link, mã giảm giá, đánh giá sao
+- Dùng các cụm "thường thì...", "giá thị trường khoảng...", "có thể bạn quan tâm đến...", "ngoài ra còn có..."
+- Dùng kiến thức chung về nông sản / kinh nghiệm cá nhân để lấp chỗ trống
+- Đề xuất shop/sản phẩm thay thế bằng phỏng đoán
+
+Câu trả lời chỉ gồm ĐÚNG 1 đoạn thông báo trên. Có thể kết bằng 1 câu hỏi gợi mở ngắn (vd: "Bạn muốn tôi tìm theo loại khác không?") nhưng KHÔNG được kèm bất kỳ tên/giá/số liệu nào.`;
 
     workingMessages.push({ role: 'system', content: groundingContent });
 
