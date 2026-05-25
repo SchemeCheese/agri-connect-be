@@ -33,8 +33,8 @@ export class PaymentsController {
   // FE polling trạng thái thanh toán — chạy ngay sau khi mở popup MoMo,
   // tự đóng popup khi paymentStatus = PAID. Không cần gated dev — buyer-only.
   @UseGuards(AuthGuard('jwt'))
-  @Get('momo/status')
-  async momoStatus(@Request() req, @Query('orderId') orderId: string) {
+  @Get('momo/status/:orderId')
+  async momoStatus(@Request() req, @Param('orderId') orderId: string) {
     return this.paymentsService.getMomoPaymentStatus(req.user.sub, orderId);
   }
 

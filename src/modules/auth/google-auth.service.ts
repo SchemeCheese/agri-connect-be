@@ -29,8 +29,10 @@ export class GoogleAuthService {
   }
 
   private roleFlags(role?: GoogleAuthRole) {
+    // BUYER là role base — mọi user (kể cả seller) đều có quyền mua hàng,
+    // nên RolesGuard cho /orders/checkout pass. SELLER là quyền bổ sung.
     return {
-      is_buyer: role === GoogleAuthRole.BUYER,
+      is_buyer: true,
       is_seller: role === GoogleAuthRole.SELLER,
     };
   }

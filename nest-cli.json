@@ -5,14 +5,7 @@
   "compilerOptions": {
     "deleteOutDir": true,
     "assets": [
-      {
-        "include": "**/*.hbs",
-        "watchAssets": true
-      },
-      {
-        "include": "**/*.png",
-        "watchAssets": true
-      }
+      "**/*.hbs"
     ],
     "watchAssets": true
   },

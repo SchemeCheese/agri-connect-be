@@ -8,7 +8,18 @@ export class EmailService {
 
   constructor(private mailerService: MailerService) {}
 
+  // Trả về false (kèm log) nếu thiếu MAIL_HOST/USER/PASS — tránh SMTP cố
+  // connect tới undefined và throw từ nodemailer plugin chain (sync error
+  // có thể thoát ra ngoài try-catch và sập tiến trình).
+  private isSmtpConfigured(): boolean {
+    return Boolean(process.env.MAIL_HOST && process.env.MAIL_USER && process.env.MAIL_PASS);
+  }
+
   async sendVerificationOTP(email: string, code: string, fullName: string) {
+    if (!this.isSmtpConfigured()) {
+      this.logger.warn(`[SKIP] OTP cho ${email} — chưa cấu hình MAIL_HOST/MAIL_USER/MAIL_PASS trong .env`);
+      throw new Error('Email service chưa được cấu hình. Liên hệ admin để bật SMTP.');
+    }
     try {
       await this.mailerService.sendMail({
         to: email,
@@ -36,6 +47,10 @@ export class EmailService {
     orderId: string,
     reason: string,
   ) {
+    if (!this.isSmtpConfigured()) {
+      this.logger.warn(`[SKIP] Email hủy đơn #${orderId} → ${email} — SMTP chưa cấu hình`);
+      return false;
+    }
     try {
       await this.mailerService.sendMail({
         to: email,
@@ -62,6 +77,10 @@ export class EmailService {
     amount: string,
     paymentMethod: PaymentMethod,
   ) {
+    if (!this.isSmtpConfigured()) {
+      this.logger.warn(`[SKIP] Email hoàn tiền #${orderId} → ${email} — SMTP chưa cấu hình`);
+      return false;
+    }
     const methodLabels: Record<PaymentMethod, string> = {
       COD: 'Thanh toán khi nhận hàng',
       QR_CODE: 'QR Ngân hàng',
@@ -95,6 +114,10 @@ export class EmailService {
     sellerName: string,
     orderId: string,
   ) {
+    if (!this.isSmtpConfigured()) {
+      this.logger.warn(`[SKIP] Email COD fail #${orderId} → ${buyerEmail} — SMTP chưa cấu hình`);
+      return false;
+    }
     try {
       await this.mailerService.sendMail({
         to: buyerEmail,
@@ -121,6 +144,10 @@ export class EmailService {
     orderId: string,
     note: string,
   ) {
+    if (!this.isSmtpConfigured()) {
+      this.logger.warn(`[SKIP] Email báo sự cố (buyer) #${orderId} → ${buyerEmail} — SMTP chưa cấu hình`);
+      return false;
+    }
     try {
       await this.mailerService.sendMail({
         to: buyerEmail,
@@ -149,6 +176,10 @@ export class EmailService {
     paymentMethod: PaymentMethod,
     note: string,
   ) {
+    if (!this.isSmtpConfigured()) {
+      this.logger.warn(`[SKIP] Email báo sự cố (seller) #${orderId} → ${sellerEmail} — SMTP chưa cấu hình`);
+      return false;
+    }
     const methodLabels: Record<PaymentMethod, string> = {
       COD: 'Thanh toán khi nhận hàng',
       QR_CODE: 'QR Ngân hàng',
@@ -184,6 +215,10 @@ export class EmailService {
     orderId: string,
     reply: string,
   ) {
+    if (!this.isSmtpConfigured()) {
+      this.logger.warn(`[SKIP] Email seller reply #${orderId} → ${buyerEmail} — SMTP chưa cấu hình`);
+      return false;
+    }
     try {
       await this.mailerService.sendMail({
         to: buyerEmail,

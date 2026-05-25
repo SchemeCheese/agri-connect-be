@@ -79,9 +79,10 @@ export class AuthService {
     }
 
     // Map field `role` (string alias) → boolean flags. Hỗ trợ cả 2 cách truyền DTO.
-    const wantBuyer = dto.is_buyer ?? (dto.role ? dto.role === 'BUYER' : true);
+    // BUYER là role base — mọi user đều có quyền mua hàng. SELLER là quyền bổ sung
+    // bật thêm trên cùng user (RolesGuard check `is_buyer` cho /orders/checkout).
     const wantSeller = dto.is_seller ?? (dto.role === 'SELLER');
-    const finalBuyer = wantBuyer || !wantSeller; // luôn có ít nhất 1 role
+    const finalBuyer = true;
 
     const existingUser = await this.databaseService.user.findUnique({ where: { email: dto.email } });
 

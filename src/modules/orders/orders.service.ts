@@ -100,34 +100,50 @@ export class OrdersService {
                             },
                         });
 
-                        if (
+                        const isStructurallyValid =
                             voucher &&
                             voucher.is_active &&
                             now >= voucher.valid_from &&
                             now <= voucher.valid_to &&
-                            voucher.used_count < voucher.usage_limit &&
-                            subtotal >= Number(voucher.min_order_value)
-                        ) {
-                            if (voucher.discount_type === 'PERCENT') {
-                                discountAmount = (subtotal * Number(voucher.discount_value)) / 100;
-                                discountAmount = Math.min(discountAmount, Number(voucher.max_discount_amount));
-                            } else {
-                                discountAmount = Number(voucher.discount_value);
-                            }
-                            discountAmount = Math.floor(Math.min(discountAmount, subtotal));
-                            finalPrice = subtotal - discountAmount;
-                            voucherId = voucher.id;
+                            subtotal >= Number(voucher.min_order_value);
 
-                            await prisma.voucher.update({
-                                where: { id: voucher.id },
-                                data: { used_count: { increment: 1 } },
-                            });
-                        } else if (voucher_code) {
+                        if (!voucher || !isStructurallyValid) {
                             // Mã có nhưng không hợp lệ — throw lỗi rõ ràng cho FE
                             throw new BadRequestException(
                                 `Mã giảm giá "${voucher_code}" không hợp lệ hoặc không thể áp dụng cho đơn này.`
                             );
                         }
+
+                        // Race-safe: tăng used_count atomically tại DB.
+                        // updateMany với where(used_count < usage_limit) dịch ra SQL
+                        // `UPDATE ... WHERE used_count < N` — Postgres row-lock đảm bảo
+                        // hai checkout song song không thể cùng vượt usage_limit.
+                        const incrementResult = await prisma.voucher.updateMany({
+                            where: {
+                                id: voucher.id,
+                                used_count: { lt: voucher.usage_limit },
+                                is_active: true,
+                                valid_from: { lte: now },
+                                valid_to: { gte: now },
+                            },
+                            data: { used_count: { increment: 1 } },
+                        });
+
+                        if (incrementResult.count === 0) {
+                            throw new BadRequestException(
+                                `Mã giảm giá "${voucher_code}" đã hết lượt sử dụng.`
+                            );
+                        }
+
+                        if (voucher.discount_type === 'PERCENT') {
+                            discountAmount = (subtotal * Number(voucher.discount_value)) / 100;
+                            discountAmount = Math.min(discountAmount, Number(voucher.max_discount_amount));
+                        } else {
+                            discountAmount = Number(voucher.discount_value);
+                        }
+                        discountAmount = Math.floor(Math.min(discountAmount, subtotal));
+                        finalPrice = subtotal - discountAmount;
+                        voucherId = voucher.id;
                     }
 
                     // Tạo Order
@@ -454,31 +470,35 @@ export class OrdersService {
             },
         });
 
-        // Gửi email xác nhận cho BUYER
-        if (order.buyer?.email) {
-            await this.emailService.sendIssueReportedToBuyerEmail(
-                order.buyer.email,
-                order.buyer.full_name,
-                order.seller?.full_name ?? 'Người bán',
-                orderId,
-                issueNote,
-            );
-        } else {
-            console.warn(`[WARN] Buyer email not found for order #${orderId}`);
-        }
+        try {
+            // Gửi email xác nhận cho BUYER
+            if (order.buyer?.email) {
+                await this.emailService.sendIssueReportedToBuyerEmail(
+                    order.buyer.email,
+                    order.buyer.full_name,
+                    order.seller?.full_name ?? 'Người bán',
+                    orderId,
+                    issueNote,
+                );
+            } else {
+                console.warn(`[WARN] Buyer email not found for order #${orderId}`);
+            }
 
-        // Gửi email cảnh báo cho SELLER — yêu cầu đối soát với bên vận chuyển
-        if (order.seller?.email) {
-            await this.emailService.sendIssueReportedToSellerEmail(
-                order.seller.email,
-                order.seller.full_name,
-                order.buyer?.full_name ?? 'Người mua',
-                orderId,
-                order.payment_method,
-                issueNote,
-            );
-        } else {
-            console.warn(`[WARN] Seller email not found for order #${orderId}`);
+            // Gửi email cảnh báo cho SELLER — yêu cầu đối soát với bên vận chuyển
+            if (order.seller?.email) {
+                await this.emailService.sendIssueReportedToSellerEmail(
+                    order.seller.email,
+                    order.seller.full_name,
+                    order.buyer?.full_name ?? 'Người mua',
+                    orderId,
+                    order.payment_method,
+                    issueNote,
+                );
+            } else {
+                console.warn(`[WARN] Seller email not found for order #${orderId}`);
+            }
+        } catch (error) {
+            this.logger.error('Lỗi gửi email:', error);
         }
 
         return {
@@ -554,7 +574,13 @@ export class OrdersService {
             return { message: 'Đơn COD đã được đánh dấu RETURNED. Không phát sinh hoàn tiền.' };
         }
 
-        // ── Rule 3 (MoMo prepaid): queue for refund ────────────────────────
+        // ── Rule 3 (MoMo prepaid): queue + auto-refund ngay ─────────────────
+        // Bước 1 (tx): Order=REFUND_PENDING + Payment=REFUNDING.
+        // Bước 2: gọi MoMo refund API — refundMomoTransaction chấp nhận
+        //   Payment.status REFUNDING, idempotent với REFUNDED, và khi thành công
+        //   sẽ tự flip Order=REFUNDED + Payment=REFUNDED trong transaction nội bộ.
+        // Nếu MoMo từ chối: giữ nguyên REFUND_PENDING/REFUNDING để admin retry,
+        //   không throw lên buyer (họ đã hoàn tất report).
         if (isMomo && paymentAlreadyPaid) {
             await this.databaseService.$transaction(async (tx) => {
                 await tx.order.update({
@@ -566,12 +592,27 @@ export class OrdersService {
                     data: { status: PaymentStatus.REFUNDING },
                 });
             });
-            // Note: admin endpoint /orders/:id/refund will execute Rule 4.
-            // To auto-refund instead, uncomment:
-            //   await this.paymentsService.refundMomoTransaction(orderId, Number(order.final_total_price), issueNote);
-            return {
-                message: 'Đã ghi nhận tranh chấp MoMo. Đơn chuyển sang REFUND_PENDING, hệ thống sẽ hoàn tiền.',
-            };
+
+            try {
+                await this.paymentsService.refundMomoTransaction(
+                    orderId,
+                    Number(order.final_total_price),
+                    issueNote,
+                );
+                return {
+                    message: 'Đã hoàn tiền MoMo thành công. Đơn chuyển sang REFUNDED.',
+                    refunded: true,
+                };
+            } catch (err) {
+                this.logger.error(
+                    `Auto-refund MoMo failed for order ${orderId}: ${(err as Error).message}. ` +
+                    `Đơn giữ ở REFUND_PENDING để admin xử lý lại.`,
+                );
+                return {
+                    message: 'Đã ghi nhận tranh chấp MoMo. Hệ thống sẽ hoàn tiền sau khi admin xác nhận.',
+                    refunded: false,
+                };
+            }
         }
 
         // ── Other prepaid (QR_CODE/ZALOPAY) or MoMo-but-not-paid ───────────
@@ -630,27 +671,50 @@ export class OrdersService {
             }),
         ]);
 
-        if (order.buyer?.email) {
-            if (isPrepaid) {
-                // Non-COD: đã trả tiền trước ⇒ gửi email thông báo hoàn tiền
-                await this.emailService.sendRefundNotificationEmail(
-                    order.buyer.email,
-                    order.buyer.full_name,
-                    orderId,
-                    order.final_total_price.toString(),
-                    order.payment_method,
-                );
+        try {
+            if (order.buyer?.email) {
+                if (isPrepaid) {
+                    // Non-COD: đã trả tiền trước ⇒ gửi email thông báo hoàn tiền
+                    await this.emailService.sendRefundNotificationEmail(
+                        order.buyer.email,
+                        order.buyer.full_name,
+                        orderId,
+                        order.final_total_price.toString(),
+                        order.payment_method,
+                    );
+                } else {
+                    // COD: chưa trả tiền ⇒ gửi email báo giao thất bại, không mất tiền
+                    await this.emailService.sendOrderFailedCodEmail(
+                        order.buyer.email,
+                        order.buyer.full_name,
+                        sellerName,
+                        orderId,
+                    );
+                }
             } else {
-                // COD: chưa trả tiền ⇒ gửi email báo giao thất bại, không mất tiền
-                await this.emailService.sendOrderFailedCodEmail(
-                    order.buyer.email,
-                    order.buyer.full_name,
-                    sellerName,
+                console.warn(`[WARN] Buyer email not found for order #${orderId}`);
+            }
+        } catch (error) {
+            this.logger.error('Lỗi gửi email:', error);
+        }
+
+        // Hoàn tiền thật qua MoMo nếu đã trả trước bằng MoMo
+        if (isPrepaid && order.payment_method === PaymentMethod.MOMO) {
+            try {
+                await this.paymentsService.refundMomoTransaction(
                     orderId,
+                    Number(order.final_total_price),
+                    'Người bán xác nhận thất lạc hàng',
+                );
+                await this.databaseService.payment.updateMany({
+                    where: { order_id: orderId },
+                    data: { status: PaymentStatus.REFUNDED },
+                });
+            } catch (error) {
+                this.logger.error(
+                    `Lỗi hoàn tiền MoMo cho đơn ${orderId}: ${(error as Error).message}. Payment giữ ở REFUNDING để admin xử lý lại.`,
                 );
             }
-        } else {
-            console.warn(`[WARN] Buyer email not found for order #${orderId}`);
         }
 
         return {
@@ -682,13 +746,17 @@ export class OrdersService {
         });
 
         // Gửi email thông báo hủy cho người mua
-        if (order.buyer?.email) {
-            await this.emailService.sendCancelOrderEmail(
-                order.buyer.email,
-                order.buyer.full_name,
-                orderId,
-                reason,
-            );
+        try {
+            if (order.buyer?.email) {
+                await this.emailService.sendCancelOrderEmail(
+                    order.buyer.email,
+                    order.buyer.full_name,
+                    orderId,
+                    reason,
+                );
+            }
+        } catch (error) {
+            this.logger.error('Lỗi gửi email:', error);
         }
 
         return { ...updated, cancel_reason: reason };

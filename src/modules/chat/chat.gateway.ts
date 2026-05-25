@@ -340,6 +340,9 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       proposed_quantity: null,
       proposed_price: null,
       quote: {
+        // messageId trong nested quote dùng để FE gọi respondToQuote chính xác
+        // (extractQuote ưu tiên msg.quote nên nếu thiếu field này => undefined)
+        messageId: message.id,
         productId: message.quote_product_id,
         productName: message.quote_product_name,
         quantity: message.quote_quantity ? Number(message.quote_quantity) : null,
@@ -354,13 +357,27 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
   }
 
   // ─── Event: respondToQuote — Buyer chấp nhận hoặc từ chối báo giá ────────────────────
-  // FE gọi: socket.emit('respondToQuote', { messageId, action: 'ACCEPTED' | 'REJECTED' })
+  // FE gọi: socket.emit('respondToQuote', { messageId, action: 'ACCEPTED' | 'REJECTED', conversationId })
   @SubscribeMessage('respondToQuote')
   async handleRespondToQuote(
     @ConnectedSocket() client: Socket,
     @MessageBody() data: { messageId: string; action: 'ACCEPTED' | 'REJECTED'; conversationId: string },
   ) {
-    const userId = await this.ensureMember(client, data?.conversationId);
+    // ── Payload validation: chặn crash Prisma khi FE quên/sai field ───────
+    if (!data || typeof data !== 'object') {
+      throw new WsException('Payload không hợp lệ.');
+    }
+    if (!data.conversationId || typeof data.conversationId !== 'string') {
+      throw new WsException('Thiếu conversationId.');
+    }
+    if (!data.messageId || typeof data.messageId !== 'string') {
+      throw new WsException('Thiếu messageId của báo giá.');
+    }
+    if (data.action !== 'ACCEPTED' && data.action !== 'REJECTED') {
+      throw new WsException('action phải là "ACCEPTED" hoặc "REJECTED".');
+    }
+
+    const userId = await this.ensureMember(client, data.conversationId);
 
     const result = await this.negotiationService.respondToQuote(userId, data.messageId, data.action);
 

@@ -40,7 +40,9 @@ async function bootstrap() {
     credentials: true,
   });
 
-  await app.listen(port);
+  // Bind explicitly to 0.0.0.0 so phones on the same Wi-Fi (Expo Go) can
+  // reach the dev server at the host's LAN IP, not just localhost.
+  await app.listen(port, '0.0.0.0');
   console.log(`[Bootstrap] Server listening on port ${port}`);
   console.log(`[Bootstrap] NODE_ENV: ${nodeEnv}`);
   console.log(`[Bootstrap] CORS origins: ${corsOrigins?.join(', ') ?? 'all (open)'}`);

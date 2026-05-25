@@ -190,6 +190,15 @@ export class NegotiationService {
     messageId: string,
     action: 'ACCEPTED' | 'REJECTED',
   ) {
+    // Failsafe: chặn Prisma findUnique({ id: undefined }) — gây PrismaClientValidationError.
+    // Gateway đã validate nhưng giữ guard ở đây để callers HTTP/test/internal cũng an toàn.
+    if (!messageId || typeof messageId !== 'string') {
+      throw new BadRequestException('Thiếu messageId của báo giá.');
+    }
+    if (action !== 'ACCEPTED' && action !== 'REJECTED') {
+      throw new BadRequestException('action phải là "ACCEPTED" hoặc "REJECTED".');
+    }
+
     const msg = await this.db.chatMessage.findUnique({
       where: { id: messageId },
       include: { conversation: true },

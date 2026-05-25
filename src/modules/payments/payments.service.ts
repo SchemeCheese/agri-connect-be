@@ -27,12 +27,15 @@ export class PaymentsService {
   constructor(private readonly db: DatabaseService) {}
 
   private getMomoConfig() {
-    const partnerCode = process.env.MOMO_PARTNER_CODE;
-    const accessKey = process.env.MOMO_ACCESS_KEY;
-    const secretKey = process.env.MOMO_SECRET_KEY;
-    const endpoint = process.env.MOMO_ENDPOINT || 'https://test-payment.momo.vn/v2/gateway/api/create';
-    const redirectUrl = process.env.MOMO_REDIRECT_URL || 'http://localhost:3001/payments/momo/return';
-    const ipnUrl = process.env.MOMO_IPN_URL;
+    // .trim() để chống leading/trailing whitespace trong .env (ví dụ
+    // `MOMO_IPN_URL= https://...` → MoMo reject URL → không nhận được IPN
+    // → Payment không bao giờ flip PAID → FE polling mắc kẹt UNPAID).
+    const partnerCode = process.env.MOMO_PARTNER_CODE?.trim();
+    const accessKey = process.env.MOMO_ACCESS_KEY?.trim();
+    const secretKey = process.env.MOMO_SECRET_KEY?.trim();
+    const endpoint = process.env.MOMO_ENDPOINT?.trim() || 'https://test-payment.momo.vn/v2/gateway/api/create';
+    const redirectUrl = process.env.MOMO_REDIRECT_URL?.trim() || 'http://localhost:3001/payments/momo/return';
+    const ipnUrl = process.env.MOMO_IPN_URL?.trim();
 
     if (!partnerCode || !accessKey || !secretKey) {
       throw new BadRequestException('Chưa cấu hình biến môi trường MoMo (MOMO_PARTNER_CODE, MOMO_ACCESS_KEY, MOMO_SECRET_KEY)');
@@ -100,6 +103,9 @@ export class PaymentsService {
       lang: 'vi',
     };
 
+    this.logger.log(
+      `[MoMo CREATE] order=${orderId} amount=${amount} ipnUrl="${ipnUrl}" redirectUrl="${redirectUrl}"`,
+    );
     const response = await axios.post(endpoint, payload, { headers: { 'Content-Type': 'application/json' } });
     const data = response.data as any;
 
@@ -123,6 +129,9 @@ export class PaymentsService {
   }
 
   async handleMomoIpn(ipn: MomoIpnPayload) {
+    this.logger.log(
+      `[MoMo IPN] orderId=${ipn.orderId} resultCode=${ipn.resultCode} transId=${ipn.transId} amount=${ipn.amount}`,
+    );
     const { partnerCode, accessKey, secretKey } = this.getMomoConfig();
 
     if (ipn.partnerCode !== partnerCode) {
@@ -130,22 +139,24 @@ export class PaymentsService {
       throw new BadRequestException('Invalid partnerCode');
     }
 
+    // Fallback `?? ''` cho mọi field — MoMo đôi khi bỏ trống extraData/payType/orderType
+    // và string concat sẽ ép undefined thành chữ "undefined" → sai signature.
     const rawSignature =
-      `accessKey=${accessKey}&amount=${ipn.amount}&extraData=${ipn.extraData}&message=${ipn.message}` +
-      `&orderId=${ipn.orderId}&orderInfo=${ipn.orderInfo}&orderType=${ipn.orderType}` +
-      `&partnerCode=${ipn.partnerCode}&payType=${ipn.payType}&requestId=${ipn.requestId}` +
-      `&responseTime=${ipn.responseTime}&resultCode=${ipn.resultCode}&transId=${ipn.transId}`;
+      `accessKey=${accessKey}&amount=${ipn.amount ?? ''}&extraData=${ipn.extraData ?? ''}&message=${ipn.message ?? ''}` +
+      `&orderId=${ipn.orderId ?? ''}&orderInfo=${ipn.orderInfo ?? ''}&orderType=${ipn.orderType ?? ''}` +
+      `&partnerCode=${ipn.partnerCode ?? ''}&payType=${ipn.payType ?? ''}&requestId=${ipn.requestId ?? ''}` +
+      `&responseTime=${ipn.responseTime ?? ''}&resultCode=${ipn.resultCode ?? ''}&transId=${ipn.transId ?? ''}`;
 
     const expected = this.signMomoRequest(rawSignature, secretKey);
     if (expected !== ipn.signature) {
-      this.logger.warn('MoMo IPN signature mismatch');
+      this.logger.error(`MoMo IPN signature mismatch. payload=${JSON.stringify(ipn)} rawSignature=${rawSignature} expected=${expected}`);
       throw new BadRequestException('Invalid signature');
     }
 
-    // Only process success once. MoMo orderId is `${dbOrderId}-${ts}` — tách lại id gốc.
+    // Only process success once. MoMo orderId là `${realOrderId}-${ts}` — tách lại id gốc.
     if (ipn.resultCode === 0) {
-      const dbOrderId = ipn.orderId.split('-')[0];
-      await this.markPaymentSucceeded(dbOrderId, ipn.transId);
+      const realOrderId = ipn.orderId.split('-')[0];
+      await this.markPaymentSucceeded(realOrderId, ipn.transId);
     }
 
     return { resultCode: 0, message: 'OK' };
@@ -170,23 +181,23 @@ export class PaymentsService {
    */
   async handleMomoReturn(query: Record<string, string>): Promise<string> {
     const feBase = process.env.FRONTEND_URL || 'http://localhost:3000';
-    // MoMo trả về `${dbOrderId}-${ts}` ở query.orderId — tách lại id gốc cho DB lookup
-    // và FE redirect, nhưng giữ nguyên giá trị composite để tính lại signature.
-    const momoOrderId = query.orderId;
-    if (!momoOrderId) return `${feBase}/payment/failed?reason=missing_orderId`;
-    const orderId = momoOrderId.split('-')[0];
+    // MoMo trả về `${realOrderId}-${ts}` ở query.orderId — giữ composite để tính
+    // signature, còn DB lookup + FE redirect dùng realOrderId.
+    const orderId = query.orderId;
+    if (!orderId) return `${feBase}/payment/failed?reason=missing_orderId`;
+    const realOrderId = orderId.split('-')[0];
 
     const { accessKey, secretKey, partnerCode } = this.getMomoConfig();
     if (query.partnerCode && query.partnerCode !== partnerCode) {
       this.logger.warn(`Return partnerCode mismatch: ${query.partnerCode}`);
-      return `${feBase}/payment/failed?orderId=${orderId}&reason=partner_mismatch`;
+      return `${feBase}/payment/failed?orderId=${realOrderId}&reason=partner_mismatch`;
     }
 
     // MoMo signs return-URL fields in the same alphabetical order as the request
     // create signature, sans signature itself.
     const rawSignature =
       `accessKey=${accessKey}&amount=${query.amount ?? ''}&extraData=${query.extraData ?? ''}` +
-      `&message=${query.message ?? ''}&orderId=${momoOrderId}&orderInfo=${query.orderInfo ?? ''}` +
+      `&message=${query.message ?? ''}&orderId=${orderId}&orderInfo=${query.orderInfo ?? ''}` +
       `&orderType=${query.orderType ?? ''}&partnerCode=${query.partnerCode ?? partnerCode}` +
       `&payType=${query.payType ?? ''}&requestId=${query.requestId ?? ''}` +
       `&responseTime=${query.responseTime ?? ''}&resultCode=${query.resultCode ?? ''}` +
@@ -196,21 +207,21 @@ export class PaymentsService {
     // Signature mismatch on return is treated as soft failure — we still redirect
     // (don't 500 the buyer) but log it so we notice tampering / bad config.
     if (query.signature && expected !== query.signature) {
-      this.logger.warn(`MoMo return signature mismatch for order ${orderId}`);
+      this.logger.error(`MoMo return signature mismatch. query=${JSON.stringify(query)} rawSignature=${rawSignature} expected=${expected}`);
     }
 
     const resultCode = Number(query.resultCode ?? -1);
     if (resultCode === 0 && query.transId) {
       try {
-        await this.markPaymentSucceeded(orderId, query.transId);
+        await this.markPaymentSucceeded(realOrderId, query.transId);
       } catch (err) {
         // If Payment row not found yet (very unusual race), let IPN handle it.
-        this.logger.warn(`markPaymentSucceeded from return failed for ${orderId}: ${(err as Error).message}`);
+        this.logger.warn(`markPaymentSucceeded from return failed for ${realOrderId}: ${(err as Error).message}`);
       }
-      return `${feBase}/payment/success?orderId=${orderId}&transId=${encodeURIComponent(query.transId)}&amount=${encodeURIComponent(query.amount ?? '')}`;
+      return `${feBase}/payment/success?orderId=${realOrderId}&transId=${encodeURIComponent(query.transId)}&amount=${encodeURIComponent(query.amount ?? '')}`;
     }
 
-    return `${feBase}/payment/failed?orderId=${orderId}&resultCode=${resultCode}&message=${encodeURIComponent(query.message ?? '')}`;
+    return `${feBase}/payment/failed?orderId=${realOrderId}&resultCode=${resultCode}&message=${encodeURIComponent(query.message ?? '')}`;
   }
 
   /**
@@ -359,10 +370,6 @@ export class PaymentsService {
    *    flip together (REFUNDED).
    */
   async refundMomoTransaction(orderId: string, amount: number, reason = 'Buyer not received') {
-    const { partnerCode, accessKey, secretKey, endpoint } = this.getMomoConfig();
-    const refundEndpoint =
-      process.env.MOMO_REFUND_ENDPOINT || endpoint.replace('/create', '/refund');
-
     const payment = await this.db.payment.findFirst({
       where: { order_id: orderId, payment_method: PaymentMethod.MOMO },
     });
@@ -379,10 +386,46 @@ export class PaymentsService {
       throw new BadRequestException('Thiếu transId gốc — không thể gọi MoMo refund.');
     }
 
+    // Demo refund: giao dịch gốc là giả lập (DEV-xxx) ⇒ skip MoMo API,
+    // mark REFUNDED tại DB để demo chạy end-to-end mà không cần ngrok IPN thật.
+    const isDevTransaction = payment.transaction_ref.startsWith('DEV-');
+    const refundAmount = Math.floor(amount); // MoMo yêu cầu integer VND
+
+    if (isDevTransaction) {
+      this.logger.warn(
+        `[DEV-SIMULATOR] Refund for order ${orderId} — transId ${payment.transaction_ref} is simulated. Skipping MoMo API, marking REFUNDED locally.`,
+      );
+      const fakeRefundId = `DEV-RFD-${Date.now()}`;
+      await this.db.$transaction(async (tx) => {
+        await tx.payment.update({
+          where: { id: payment.id },
+          data: {
+            status: PaymentStatus.REFUNDED,
+            transaction_ref: `${payment.transaction_ref}|refund:${fakeRefundId}`,
+          },
+        });
+        await tx.order.update({
+          where: { id: orderId },
+          data: { status: OrderStatus.REFUNDED },
+        });
+      });
+      return {
+        message: 'Hoàn tiền MoMo thành công (DEV simulator).',
+        refundTransId: fakeRefundId,
+        refundOrderId: `${orderId}-rfd-dev-${Date.now()}`,
+        amount: refundAmount,
+        simulated: true,
+      };
+    }
+
+    // Giao dịch thật ⇒ gọi MoMo refund API
+    const { partnerCode, accessKey, secretKey, endpoint } = this.getMomoConfig();
+    const refundEndpoint =
+      process.env.MOMO_REFUND_ENDPOINT || endpoint.replace('/create', '/refund');
+
     const refundOrderId = `${orderId}-rfd-${Date.now()}`;
     const requestId = `${Date.now()}`;
     const description = reason;
-    const refundAmount = Math.floor(amount); // MoMo requires integer VND
 
     const rawSignature =
       `accessKey=${accessKey}&amount=${refundAmount}&description=${description}` +

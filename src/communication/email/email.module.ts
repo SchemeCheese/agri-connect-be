@@ -29,7 +29,10 @@ import { join } from 'path';
           from: process.env.MAIL_FROM || '"Agri Connect" <noreply@agriconnect.com>',
         },
         template: {
-          dir: join(__dirname, 'templates'),
+          // Trỏ thẳng tới src/ để không phụ thuộc dist (tránh ENOENT khi build
+          // chưa kịp copy .hbs). readFileSync trong nodemailer plugin có thể
+          // throw đồng bộ và thoát khỏi try-catch → sập tiến trình.
+          dir: join(process.cwd(), 'src/communication/email/templates'),
           adapter: new HandlebarsAdapter(),
           options: {
             strict: true,
