@@ -1,4 +1,4 @@
-import { IsNotEmpty, IsNumber, IsString, MaxLength, Min } from 'class-validator';
+import { IsInt, IsNotEmpty, IsString, MaxLength, Min } from 'class-validator';
 import { Type } from 'class-transformer';
 
 export class SendNegotiationQuoteDto {
@@ -15,13 +15,13 @@ export class SendNegotiationQuoteDto {
   @MaxLength(200)
   productName: string;
 
-  @IsNumber()
-  @Min(0)
+  @IsInt()
+  @Min(1)
   @Type(() => Number)
   quantity: number;
 
-  @IsNumber()
-  @Min(0)
+  @IsInt()
+  @Min(1000)
   @Type(() => Number)
   price: number;
 

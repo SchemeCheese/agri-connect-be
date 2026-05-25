@@ -12,25 +12,16 @@ import { Server, Socket } from 'socket.io';
 import { JwtService } from '@nestjs/jwt';
 import { ChatService } from './chat.service';
 import { NegotiationService } from './negotiation.service';
-import { Logger, UsePipes, ValidationPipe, ValidationError } from '@nestjs/common';
+import { Logger, UsePipes } from '@nestjs/common';
+import { wsValidationPipe } from '../../common/pipes/ws-validation.pipe';
 import { SendMessageDto } from './dtos/send-message.dto';
 import { SendNegotiationQuoteDto } from './dtos/send-negotiation-quote.dto';
 import { RespondToQuoteDto } from './dtos/respond-to-quote.dto';
-
-// ValidationPipe cho WebSocket: chuyển BadRequestException → WsException
-// để FE nhận lỗi qua kênh socket 'exception' với message rõ ràng (không phải HTTP 400).
-const wsValidationPipe = new ValidationPipe({
-  whitelist: true,
-  forbidNonWhitelisted: true,
-  transform: true,
-  exceptionFactory: (errors: ValidationError[]) => {
-    const msg = errors
-      .map((e) => Object.values(e.constraints ?? {}).join(', '))
-      .filter(Boolean)
-      .join('; ');
-    return new WsException(msg || 'Payload không hợp lệ.');
-  },
-});
+import { JoinRoomDto } from './dtos/join-room.dto';
+import { SendImageMessageDto } from './dtos/send-image-message.dto';
+import { StartConversationDto } from './dtos/start-conversation.dto';
+import { StartNegotiationDto } from './dtos/start-negotiation.dto';
+import { CancelNegotiationDto } from './dtos/cancel-negotiation.dto';
 
 // Cho phép CORS từ FE (chỉnh origin phù hợp khi deploy)
 @WebSocketGateway({
@@ -118,11 +109,12 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
   // ─── Event: joinRoom — tham gia phòng theo conversationId ────────────────
   // FE gọi: socket.emit('joinRoom', { conversationId })
   @SubscribeMessage('joinRoom')
+  @UsePipes(wsValidationPipe)
   async handleJoinRoom(
     @ConnectedSocket() client: Socket,
-    @MessageBody() data: { conversationId: string },
+    @MessageBody() data: JoinRoomDto,
   ) {
-    const userId = await this.ensureMember(client, data?.conversationId);
+    const userId = await this.ensureMember(client, data.conversationId);
 
     await client.join(data.conversationId);
     this.logger.log(`📥 User ${userId} joined room ${data.conversationId}`);
@@ -206,21 +198,12 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
   // Flow: FE gọi POST /chat/upload-image trước → nhận imageUrl → emit event này
   // FE gọi: socket.emit('sendImageMessage', { conversationId, imageUrl, caption?, clientMessageId? })
   @SubscribeMessage('sendImageMessage')
+  @UsePipes(wsValidationPipe)
   async handleSendImageMessage(
     @ConnectedSocket() client: Socket,
-    @MessageBody()
-    data: {
-      conversationId: string;
-      imageUrl: string;
-      caption?: string;
-      clientMessageId?: string;
-    },
+    @MessageBody() data: SendImageMessageDto,
   ) {
-    const userId = await this.ensureMember(client, data?.conversationId);
-
-    if (!data?.imageUrl) {
-      throw new WsException('Thiếu imageUrl.');
-    }
+    const userId = await this.ensureMember(client, data.conversationId);
 
     const message = await this.chatService.saveImageMessage(
       data.conversationId,
@@ -256,9 +239,10 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
   // sau đó mới emit 'startConversation' để join Socket.IO room.
   // FE gọi: socket.emit('startConversation', { partnerId })
   @SubscribeMessage('startConversation')
+  @UsePipes(wsValidationPipe)
   async handleStartConversation(
     @ConnectedSocket() client: Socket,
-    @MessageBody() data: { partnerId: string },
+    @MessageBody() data: StartConversationDto,
   ) {
     const userId = client.data?.userId;
     if (!userId) throw new WsException('Chưa xác thực.');
@@ -280,16 +264,13 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
   // ─── Event: startNegotiation — Buyer khởi động đàm phán giá ───────────────────────────
   // FE gọi: socket.emit('startNegotiation', { productId, quantity, proposedPrice })
   @SubscribeMessage('startNegotiation')
+  @UsePipes(wsValidationPipe)
   async handleStartNegotiation(
     @ConnectedSocket() client: Socket,
-    @MessageBody() data: { productId: string; quantity: number; proposedPrice: number },
+    @MessageBody() data: StartNegotiationDto,
   ) {
     const userId = client.data?.userId;
     if (!userId) throw new WsException('Chưa xác thực.');
-
-    if (!data.proposedPrice || data.proposedPrice <= 0) {
-      throw new WsException('Giá đề xuất phải lớn hơn 0.');
-    }
 
     const result = await this.negotiationService.startNegotiation(
       userId,
@@ -394,11 +375,12 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
   // ─── Event: cancelNegotiation — Hủy cuộc đàm phán (cả 2 bên) ───────────────────────────
   // FE gọi: socket.emit('cancelNegotiation', { conversationId })
   @SubscribeMessage('cancelNegotiation')
+  @UsePipes(wsValidationPipe)
   async handleCancelNegotiation(
     @ConnectedSocket() client: Socket,
-    @MessageBody() data: { conversationId: string },
+    @MessageBody() data: CancelNegotiationDto,
   ) {
-    const userId = await this.ensureMember(client, data?.conversationId);
+    const userId = await this.ensureMember(client, data.conversationId);
 
     const message = await this.negotiationService.cancelNegotiation(userId, data.conversationId);
 

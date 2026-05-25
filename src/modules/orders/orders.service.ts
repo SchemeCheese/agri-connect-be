@@ -1,4 +1,12 @@
-import { Injectable, BadRequestException, NotFoundException, ForbiddenException, Logger } from '@nestjs/common';
+import {
+    Injectable,
+    BadRequestException,
+    NotFoundException,
+    ForbiddenException,
+    HttpException,
+    InternalServerErrorException,
+    Logger,
+} from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { DatabaseService } from '../../database/database.service';
 import { EmailService } from '../../communication/email/email.service';
@@ -201,12 +209,19 @@ export class OrdersService {
             };
 
         } catch (error) {
-            if (error instanceof NotFoundException || error instanceof BadRequestException) {
+            // Preserve any HttpException (BadRequest, NotFound, voucher-exhausted, ...) — bubble up
+            // với status code và message gốc để FE hiển thị đúng nguyên nhân.
+            if (error instanceof HttpException) {
                 throw error;
             }
-            console.error('[ORDER_ERROR]:', error);
-            throw new BadRequestException(
-                'Có lỗi xảy ra trong quá trình tạo đơn hàng. Vui lòng làm mới giỏ hàng và thử lại.',
+            // Lỗi không xác định (DB deadlock, connection lost, runtime bug...) → log stack trace
+            // và trả về 500 thay vì che giấu thành 400.
+            this.logger.error(
+                'Checkout failed with an unexpected error',
+                (error as Error)?.stack ?? String(error),
+            );
+            throw new InternalServerErrorException(
+                'Đã có lỗi hệ thống xảy ra khi đặt hàng. Vui lòng thử lại sau.',
             );
         }
     }
