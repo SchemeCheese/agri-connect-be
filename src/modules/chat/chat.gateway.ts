@@ -12,7 +12,25 @@ import { Server, Socket } from 'socket.io';
 import { JwtService } from '@nestjs/jwt';
 import { ChatService } from './chat.service';
 import { NegotiationService } from './negotiation.service';
-import { Logger } from '@nestjs/common';
+import { Logger, UsePipes, ValidationPipe, ValidationError } from '@nestjs/common';
+import { SendMessageDto } from './dtos/send-message.dto';
+import { SendNegotiationQuoteDto } from './dtos/send-negotiation-quote.dto';
+import { RespondToQuoteDto } from './dtos/respond-to-quote.dto';
+
+// ValidationPipe cho WebSocket: chuyển BadRequestException → WsException
+// để FE nhận lỗi qua kênh socket 'exception' với message rõ ràng (không phải HTTP 400).
+const wsValidationPipe = new ValidationPipe({
+  whitelist: true,
+  forbidNonWhitelisted: true,
+  transform: true,
+  exceptionFactory: (errors: ValidationError[]) => {
+    const msg = errors
+      .map((e) => Object.values(e.constraints ?? {}).join(', '))
+      .filter(Boolean)
+      .join('; ');
+    return new WsException(msg || 'Payload không hợp lệ.');
+  },
+});
 
 // Cho phép CORS từ FE (chỉnh origin phù hợp khi deploy)
 @WebSocketGateway({
@@ -146,15 +164,12 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
   // ─── Event: sendMessage — gửi tin nhắn ───────────────────────────────────
   // FE gọi: socket.emit('sendMessage', { conversationId, content })
   @SubscribeMessage('sendMessage')
+  @UsePipes(wsValidationPipe)
   async handleSendMessage(
     @ConnectedSocket() client: Socket,
-    @MessageBody() data: { conversationId: string; content: string; clientMessageId?: string },
+    @MessageBody() data: SendMessageDto,
   ) {
-    const userId = await this.ensureMember(client, data?.conversationId);
-
-    if (!data.content?.trim()) {
-      throw new WsException('Nội dung tin nhắn không được rỗng.');
-    }
+    const userId = await this.ensureMember(client, data.conversationId);
 
     const message = await this.chatService.saveMessage(
       data.conversationId,
@@ -314,18 +329,12 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
   // ─── Event: sendNegotiationQuote — Seller gửi card báo giá ──────────────────────────────
   // FE gọi: socket.emit('sendNegotiationQuote', { conversationId, productId, productName, quantity, price, unit })
   @SubscribeMessage('sendNegotiationQuote')
+  @UsePipes(wsValidationPipe)
   async handleSendNegotiationQuote(
     @ConnectedSocket() client: Socket,
-    @MessageBody() data: {
-      conversationId: string;
-      productId: string;
-      productName: string;
-      quantity: number;
-      price: number;
-      unit: string;
-    },
+    @MessageBody() data: SendNegotiationQuoteDto,
   ) {
-    const userId = await this.ensureMember(client, data?.conversationId);
+    const userId = await this.ensureMember(client, data.conversationId);
 
     const message = await this.negotiationService.sendQuote(userId, data);
 
@@ -359,24 +368,11 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
   // ─── Event: respondToQuote — Buyer chấp nhận hoặc từ chối báo giá ────────────────────
   // FE gọi: socket.emit('respondToQuote', { messageId, action: 'ACCEPTED' | 'REJECTED', conversationId })
   @SubscribeMessage('respondToQuote')
+  @UsePipes(wsValidationPipe)
   async handleRespondToQuote(
     @ConnectedSocket() client: Socket,
-    @MessageBody() data: { messageId: string; action: 'ACCEPTED' | 'REJECTED'; conversationId: string },
+    @MessageBody() data: RespondToQuoteDto,
   ) {
-    // ── Payload validation: chặn crash Prisma khi FE quên/sai field ───────
-    if (!data || typeof data !== 'object') {
-      throw new WsException('Payload không hợp lệ.');
-    }
-    if (!data.conversationId || typeof data.conversationId !== 'string') {
-      throw new WsException('Thiếu conversationId.');
-    }
-    if (!data.messageId || typeof data.messageId !== 'string') {
-      throw new WsException('Thiếu messageId của báo giá.');
-    }
-    if (data.action !== 'ACCEPTED' && data.action !== 'REJECTED') {
-      throw new WsException('action phải là "ACCEPTED" hoặc "REJECTED".');
-    }
-
     const userId = await this.ensureMember(client, data.conversationId);
 
     const result = await this.negotiationService.respondToQuote(userId, data.messageId, data.action);
