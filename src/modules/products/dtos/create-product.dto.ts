@@ -1,6 +1,10 @@
 import { IsNotEmpty, IsString, IsNumber, IsOptional, Min } from 'class-validator';
 import { Type, Transform } from 'class-transformer';
 
+// Multipart submissions deliver empty inputs as '' instead of omitting them — collapse to
+// undefined so @IsOptional/@Type(() => Number) work the same as a JSON payload would.
+const emptyStringToUndefined = ({ value }: { value: unknown }) => (value === '' ? undefined : value);
+
 export class CreateProductDto {
   @IsNotEmpty({ message: 'Tên sản phẩm không được để trống' })
   @IsString()
@@ -11,68 +15,45 @@ export class CreateProductDto {
   description?: string;
 
   @IsOptional()
-  @Transform(({ value }) => value === '' ? undefined : value)
-  @Type(() => Number) // Chuyển đổi từ string sang number nếu cần
+  @Transform(emptyStringToUndefined)
+  @Type(() => Number)
   @IsNumber()
   @Min(0)
   reference_price?: number;
 
   @IsNotEmpty()
   @IsString()
-  unit: string; // Ví dụ: kg, tạ, tấn
+  unit: string;
 
   @IsOptional()
-  @Transform(({ value }) => value === '' ? undefined : value)
+  @Transform(emptyStringToUndefined)
   @Type(() => Number)
   @IsNumber()
   @Min(0)
   stock_quantity?: number;
 
   @IsOptional()
-  @Transform(({ value }) => value === '' ? undefined : value)
-  @Type(() => Number) // category_id trong DB là Int
+  @Transform(emptyStringToUndefined)
+  @Type(() => Number)
   @IsNumber()
   category_id?: number;
 
   @IsOptional()
   @IsString()
   location?: string;
-  
-  @IsOptional()
-  @IsString()
-  certification?: string; // VietGAP, GlobalGAP...
-
-  @IsOptional()
-  @Transform(({ value }) => value === '' ? undefined : value)
-  @Type(() => Number)
-  @IsNumber()
-  @Min(0)
-  min_negotiation_qty?: number; // null = không cho phép thương lượng; > 0 = số kg tối thiểu
-
-  // ----- Alias fields to accept existing FE payload -----
-  @IsOptional()
-  @Transform(({ value }) => value === '' ? undefined : value)
-  @Type(() => Number)
-  @IsNumber()
-  @Min(0)
-  price?: number; // FE sends price
-
-  @IsOptional()
-  @Transform(({ value }) => value === '' ? undefined : value)
-  @Type(() => Number)
-  @IsNumber()
-  @Min(0)
-  stock?: number; // FE sends stock
 
   @IsOptional()
   @IsString()
-  category?: string; // FE sends slug/category name
+  certification?: string;
 
   @IsOptional()
-  @IsString()
-  origin?: string; // FE sends origin instead of location
+  @Transform(emptyStringToUndefined)
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  min_negotiation_qty?: number;
 
   @IsOptional()
   @IsString({ each: true })
-  image_urls?: string[]; // optional pre-uploaded URLs
+  image_urls?: string[];
 }

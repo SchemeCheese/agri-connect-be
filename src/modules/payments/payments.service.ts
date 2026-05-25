@@ -1,8 +1,13 @@
 import { Injectable, BadRequestException, ForbiddenException, NotFoundException, Logger } from '@nestjs/common';
 import { DatabaseService } from '../../database/database.service';
-import { PaymentStatus, PaymentMethod, OrderStatus } from '@prisma/client';
+import { PaymentStatus, PaymentMethod, OrderStatus, Prisma } from '@prisma/client';
 import axios from 'axios';
 import * as crypto from 'crypto';
+
+// Accepts either the long-lived DatabaseService or a Prisma TransactionClient
+// so callers inside a $transaction can route writes through PaymentsService
+// without breaking atomicity.
+type PaymentTx = Prisma.TransactionClient | DatabaseService;
 
 interface MomoIpnPayload {
   partnerCode: string;
@@ -25,6 +30,75 @@ export class PaymentsService {
   private readonly logger = new Logger(PaymentsService.name);
 
   constructor(private readonly db: DatabaseService) {}
+
+  // ─── Domain helpers: payment row writes ─────────────────────────────────
+  // OrdersService used to do prisma.payment.create()/updateMany() inline. These
+  // helpers move that ownership into PaymentsService while accepting the caller's
+  // Prisma transaction client so atomicity is preserved.
+
+  /** Initial UNPAID payment row created during checkout. */
+  createInitialPayment(
+    tx: PaymentTx,
+    args: { orderId: string; payerId: string; amount: number; method: PaymentMethod },
+  ) {
+    return tx.payment.create({
+      data: {
+        order_id: args.orderId,
+        payer_id: args.payerId,
+        amount: args.amount,
+        payment_method: args.method,
+        status: PaymentStatus.UNPAID,
+      },
+    });
+  }
+
+  /** Flip every payment row of an order to PAID. Used by completeOrder. */
+  markPaid(tx: PaymentTx, orderId: string) {
+    return tx.payment.updateMany({
+      where: { order_id: orderId },
+      data: { status: PaymentStatus.PAID },
+    });
+  }
+
+  /** Mark COD/refund-impossible flows as FAILED. */
+  markFailed(tx: PaymentTx, orderId: string) {
+    return tx.payment.updateMany({
+      where: { order_id: orderId },
+      data: { status: PaymentStatus.FAILED },
+    });
+  }
+
+  /** Mark refund pipeline as REFUNDING (intermediate before refundMomoTransaction). */
+  markRefunding(tx: PaymentTx, orderId: string) {
+    return tx.payment.updateMany({
+      where: { order_id: orderId },
+      data: { status: PaymentStatus.REFUNDING },
+    });
+  }
+
+  /** Force REFUNDED — used as a safety mirror after a successful MoMo refund. */
+  markRefunded(tx: PaymentTx, orderId: string) {
+    return tx.payment.updateMany({
+      where: { order_id: orderId },
+      data: { status: PaymentStatus.REFUNDED },
+    });
+  }
+
+  /** Sync payment.payment_method when buyer changes order method (UNPAID only). */
+  changeMethod(tx: PaymentTx, orderId: string, method: PaymentMethod) {
+    return tx.payment.updateMany({
+      where: { order_id: orderId },
+      data: { payment_method: method },
+    });
+  }
+
+  /** Cron sweep: mark stale UNPAID rows for a batch of orders as FAILED. */
+  batchFailUnpaid(tx: PaymentTx, orderIds: string[]) {
+    return tx.payment.updateMany({
+      where: { order_id: { in: orderIds }, status: PaymentStatus.UNPAID },
+      data: { status: PaymentStatus.FAILED },
+    });
+  }
 
   private getMomoConfig() {
     // .trim() để chống leading/trailing whitespace trong .env (ví dụ

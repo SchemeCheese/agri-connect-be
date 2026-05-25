@@ -1,12 +1,32 @@
 import {
   Injectable,
+  Logger,
   NotFoundException,
   ForbiddenException,
   BadRequestException,
 } from '@nestjs/common';
+import { promises as fsp } from 'fs';
 import { DatabaseService } from '../../database/database.service';
 import { CreateProductDto } from './dtos/create-product.dto';
 import { TargetType, ProductStatus } from '@prisma/client';
+
+// Best-effort cleanup of files multer dropped on disk before the handler ran.
+// Used when create/update fails after multer has already persisted the upload —
+// otherwise public/uploads/products/ would accumulate orphans.
+async function unlinkSafely(files: Express.Multer.File[], logger: Logger) {
+  await Promise.all(
+    files.map(async (f) => {
+      if (!f.path) return;
+      try {
+        await fsp.unlink(f.path);
+      } catch (err: any) {
+        if (err?.code !== 'ENOENT') {
+          logger.warn(`Failed to unlink orphan upload ${f.path}: ${err?.message ?? err}`);
+        }
+      }
+    }),
+  );
+}
 
 /**
  * Stock-driven part of the lifecycle:
@@ -36,34 +56,34 @@ type NormalizedProductPayload = {
 
 @Injectable()
 export class ProductsService {
+  private readonly logger = new Logger(ProductsService.name);
+
   constructor(private readonly db: DatabaseService) {}
 
-  // 1) Normalize incoming payload (supports FE aliases: price, stock, category slug,...)
+  // 1) Normalize incoming payload — DTO is the single source of truth, no FE aliases.
   private async normalizePayload(dto: CreateProductDto): Promise<NormalizedProductPayload> {
-    const referencePrice = dto.reference_price ?? dto.price;
-    const stockQuantity = dto.stock_quantity ?? dto.stock;
-
-    if (referencePrice === undefined || stockQuantity === undefined) {
+    if (dto.reference_price === undefined || dto.stock_quantity === undefined) {
       throw new BadRequestException('Giá và số lượng tồn kho là bắt buộc.');
     }
+    if (dto.category_id === undefined || dto.category_id === null) {
+      throw new BadRequestException('Danh mục là bắt buộc.');
+    }
 
-    const categoryId = await this.resolveCategoryId(dto.category_id ?? dto.category);
+    const categoryId = await this.assertCategoryExists(Number(dto.category_id));
 
-    const minNegotiation = dto.min_negotiation_qty === 0
-      ? null
-      : dto.min_negotiation_qty ?? null;
+    const minNegotiation =
+      dto.min_negotiation_qty === 0 ? null : dto.min_negotiation_qty ?? null;
 
     const imageUrls = this.normalizeImageUrls(dto.image_urls);
-
-    const stockNumber = Number(stockQuantity);
+    const stockNumber = Number(dto.stock_quantity);
 
     return {
       name: dto.name,
       description: dto.description ?? null,
-      reference_price: Number(referencePrice),
+      reference_price: Number(dto.reference_price),
       stock_quantity: stockNumber,
       unit: dto.unit ?? 'kg',
-      location: dto.location ?? dto.origin ?? null,
+      location: dto.location ?? null,
       certification: dto.certification ?? null,
       category_id: categoryId,
       min_negotiation_qty: minNegotiation,
@@ -78,37 +98,23 @@ export class ProductsService {
     return [urls].filter(Boolean);
   }
 
-  private async resolveCategoryId(categoryInput?: number | string): Promise<number> {
-    if (categoryInput === undefined || categoryInput === null) {
-      throw new BadRequestException('Danh mục là bắt buộc.');
-    }
-
-    // Numeric id
-    const numeric = Number(categoryInput);
-    if (!Number.isNaN(numeric) && numeric > 0) {
-      return numeric;
-    }
-
-    const slugToName: Record<string, string> = {
-      'trai-cay': 'Trái cây',
-      'rau-cu': 'Rau củ',
-      'ngu-coc': 'Ngũ cốc',
-      'gia-vi': 'Gia vị',
-      khac: 'Khác',
-    };
-
-    const categoryStr = String(categoryInput).trim();
-    const categoryName = slugToName[categoryStr] ?? categoryStr;
-
-    const category = await this.db.category.findFirst({
-      where: { name: { equals: categoryName, mode: 'insensitive' } },
-    });
-
-    if (!category) {
+  private async assertCategoryExists(categoryId: number): Promise<number> {
+    if (!Number.isFinite(categoryId) || categoryId <= 0) {
       throw new BadRequestException('Danh mục không hợp lệ.');
     }
-
+    const category = await this.db.category.findUnique({ where: { id: categoryId } });
+    if (!category) {
+      throw new BadRequestException('Danh mục không tồn tại.');
+    }
     return category.id;
+  }
+
+  // Exposed for GET /products/categories so the FE dropdown can use real DB ids.
+  async listCategories() {
+    return this.db.category.findMany({
+      orderBy: { id: 'asc' },
+      select: { id: true, name: true, parent_id: true },
+    });
   }
 
   private mapAttachmentsByTarget(attachments: { target_id: string; url: string }[]) {
@@ -119,98 +125,133 @@ export class ProductsService {
     }, {} as Record<string, string[]>);
   }
 
-  // 2) Tạo sản phẩm
+  // 2) Tạo sản phẩm — atomic: nếu bất kỳ bước nào fail, không có row mồ côi trong DB
+  // và file đã được multer ghi xuống đĩa sẽ được xoá.
   async create(sellerId: string, dto: CreateProductDto, files: Express.Multer.File[] = []) {
-    const payload = await this.normalizePayload(dto);
+    try {
+      const payload = await this.normalizePayload(dto);
 
-    const initialStatus = deriveStockStatus(payload.stock_quantity);
-    const product = await this.db.product.create({
-      data: {
-        name: payload.name,
-        description: payload.description,
-        reference_price: payload.reference_price,
-        stock_quantity: payload.stock_quantity,
-        unit: payload.unit,
-        location: payload.location,
-        certification: payload.certification,
-        seller_id: sellerId,
-        category_id: payload.category_id,
-        min_negotiation_qty: payload.min_negotiation_qty,
-        is_active: initialStatus === ProductStatus.ACTIVE,
-        status: initialStatus,
-      },
-    });
+      const initialStatus = deriveStockStatus(payload.stock_quantity);
+      const uploadedUrls = files.map((file) => `/uploads/products/${file.filename}`);
+      const allUrls = [...payload.image_urls, ...uploadedUrls];
 
-    const uploadedUrls = files.map((file) => `/uploads/products/${file.filename}`);
-    const allUrls = [...payload.image_urls, ...uploadedUrls];
+      // product + attachments commit together. If attachment.createMany throws,
+      // the product row is rolled back too — never leaves a product with no images.
+      const product = await this.db.$transaction(async (tx) => {
+        const created = await tx.product.create({
+          data: {
+            name: payload.name,
+            description: payload.description,
+            reference_price: payload.reference_price,
+            stock_quantity: payload.stock_quantity,
+            unit: payload.unit,
+            location: payload.location,
+            certification: payload.certification,
+            seller_id: sellerId,
+            category_id: payload.category_id,
+            min_negotiation_qty: payload.min_negotiation_qty,
+            is_active: initialStatus === ProductStatus.ACTIVE,
+            status: initialStatus,
+          },
+        });
 
-    if (allUrls.length > 0) {
-      await this.db.attachment.createMany({
-        data: allUrls.map((url) => ({
-          url,
-          file_type: 'IMAGE',
-          target_id: product.id,
-          target_type: TargetType.PRODUCT,
-        })),
+        if (allUrls.length > 0) {
+          await tx.attachment.createMany({
+            data: allUrls.map((url) => ({
+              url,
+              file_type: 'IMAGE',
+              target_id: created.id,
+              target_type: TargetType.PRODUCT,
+            })),
+          });
+        }
+
+        return created;
       });
-    }
 
-    return product;
+      return product;
+    } catch (err) {
+      // Validation/DB error after multer already saved files → clean disk before re-throwing.
+      await unlinkSafely(files, this.logger);
+      throw err;
+    }
   }
 
   // 3) Lấy sản phẩm của Shop
+  // Query plan:
+  //   1) product.findMany       — kèm category (single JOIN)
+  //   2) attachment.findMany    — batch ảnh theo productIds
+  //      orderItem.groupBy      — sum(quantity) theo product_id, status=COMPLETED
+  //      (chạy song song với (2))
+  //   3) product.updateMany     — gom theo (status, is_active); max 2 query trong thực tế
+  // Trước đây bước 3 là N query (Promise.all của N product.update).
   async findAllBySeller(sellerId: string) {
     const products = await this.db.product.findMany({
       where: { seller_id: sellerId },
       orderBy: { created_at: 'desc' },
-      include: {
-        category: true,
-        order_items: { include: { order: true } },
-      },
+      include: { category: true },
     });
 
     if (products.length === 0) return [];
 
     const productIds = products.map((p) => p.id);
-    const attachments = await this.db.attachment.findMany({
-      where: { target_id: { in: productIds }, target_type: TargetType.PRODUCT },
-      select: { target_id: true, url: true },
-    });
+
+    const [attachments, soldAgg] = await Promise.all([
+      this.db.attachment.findMany({
+        where: { target_id: { in: productIds }, target_type: TargetType.PRODUCT },
+        select: { target_id: true, url: true },
+      }),
+      this.db.orderItem.groupBy({
+        by: ['product_id'],
+        where: {
+          product_id: { in: productIds },
+          order: { status: 'COMPLETED' },
+        },
+        _sum: { quantity: true },
+      }),
+    ]);
+
     const imageMap = this.mapAttachmentsByTarget(attachments);
+    const soldMap = new Map<string, number>(
+      soldAgg.map((row) => [row.product_id, Number(row._sum.quantity ?? 0)]),
+    );
 
     // Sync status + is_active with current stock_quantity. Sticky terminal states
     // (DELETED, INACTIVE) are preserved by deriveStockStatus.
-    const activationUpdates = products
-      .map((p) => {
-        const stock = Number(p.stock_quantity);
-        const nextStatus = deriveStockStatus(stock, p.status);
-        const nextActive = nextStatus === ProductStatus.ACTIVE;
-        return nextStatus !== p.status || nextActive !== p.is_active
-          ? { id: p.id, status: nextStatus, is_active: nextActive }
-          : null;
-      })
-      .filter(Boolean) as { id: string; status: ProductStatus; is_active: boolean }[];
+    // Trước đây gọi N product.update; giờ gom theo (status, is_active) → tối đa 2 updateMany.
+    const groups = new Map<string, { status: ProductStatus; is_active: boolean; ids: string[] }>();
+    for (const p of products) {
+      const stock = Number(p.stock_quantity);
+      const nextStatus = deriveStockStatus(stock, p.status);
+      const nextActive = nextStatus === ProductStatus.ACTIVE;
+      if (nextStatus === p.status && nextActive === p.is_active) continue;
 
-    if (activationUpdates.length > 0) {
+      const key = `${nextStatus}|${nextActive}`;
+      const bucket = groups.get(key);
+      if (bucket) bucket.ids.push(p.id);
+      else groups.set(key, { status: nextStatus, is_active: nextActive, ids: [p.id] });
+    }
+
+    if (groups.size > 0) {
       await Promise.all(
-        activationUpdates.map((u) =>
-          this.db.product.update({
-            where: { id: u.id },
-            data: { is_active: u.is_active, status: u.status },
+        [...groups.values()].map((g) =>
+          this.db.product.updateMany({
+            where: { id: { in: g.ids } },
+            data: { status: g.status, is_active: g.is_active },
           }),
         ),
       );
-      for (const u of activationUpdates) {
-        const p = products.find((x) => x.id === u.id);
-        if (p) { p.is_active = u.is_active; p.status = u.status; }
+      // Mirror the writes onto the in-memory rows so the response reflects current truth.
+      for (const g of groups.values()) {
+        const idSet = new Set(g.ids);
+        for (const p of products) {
+          if (idSet.has(p.id)) { p.status = g.status; p.is_active = g.is_active; }
+        }
       }
     }
 
     return products.map((p) => {
-      const sold = p.order_items
-        .filter((item) => item.order.status === 'COMPLETED')
-        .reduce((sum, item) => sum + Number(item.quantity), 0);
-
+      const sold = soldMap.get(p.id) ?? 0;
       const stock = Number(p.stock_quantity);
       const isActive = stock > 0 && p.is_active;
 
@@ -222,6 +263,7 @@ export class ProductsService {
         description: p.description ?? '',
         images: imageMap[p.id] ?? [],
         category: p.category?.name ?? '',
+        category_id: p.category_id,
         unit: p.unit,
         origin: p.location ?? '',
         rating: 5,
@@ -409,6 +451,7 @@ export class ProductsService {
       price: Number(p.reference_price),
       originalPrice: Number(p.reference_price) * 1.2,
       category: p.category.name,
+      category_id: p.category_id,
       origin: p.location || 'khac',
       images: images.length > 0 ? images.map(img => img.url) : ['/images/placeholder.jpg'],
       description: p.description,
@@ -438,69 +481,84 @@ export class ProductsService {
   }
 
   // ─── PATCH /products/:id — Cập nhật sản phẩm (SELLER) ──────────────────
+  // Atomic: cập nhật sản phẩm + insert ảnh mới chạy trong cùng $transaction.
+  // Nếu bước nào fail (kể cả ownership check), files multer đã ghi xuống đĩa
+  // sẽ bị xoá để không còn orphan trong public/uploads/products/.
   async updateProduct(
     sellerId: string,
     productId: string,
     dto: Partial<CreateProductDto>,
     files: Express.Multer.File[] = [],
   ) {
-    const product = await this.db.product.findUnique({ where: { id: productId } });
-    if (!product) throw new NotFoundException('Sản phẩm không tồn tại.');
-    if (product.seller_id !== sellerId)
-      throw new ForbiddenException('Bạn không có quyền chỉnh sửa sản phẩm này.');
+    try {
+      const product = await this.db.product.findUnique({ where: { id: productId } });
+      if (!product) throw new NotFoundException('Sản phẩm không tồn tại.');
+      if (product.seller_id !== sellerId)
+        throw new ForbiddenException('Bạn không có quyền chỉnh sửa sản phẩm này.');
 
-    const categoryId = dto.category_id ?? dto.category
-      ? await this.resolveCategoryId(dto.category_id ?? dto.category)
-      : undefined;
+      const categoryId =
+        dto.category_id !== undefined && dto.category_id !== null
+          ? await this.assertCategoryExists(Number(dto.category_id))
+          : undefined;
 
-    const stockValue = dto.stock_quantity ?? dto.stock;
-    const nextStock = stockValue !== undefined ? Number(stockValue) : Number(product.stock_quantity);
+      const nextStock =
+        dto.stock_quantity !== undefined
+          ? Number(dto.stock_quantity)
+          : Number(product.stock_quantity);
 
-    const minNegotiation = dto.min_negotiation_qty === undefined
-      ? undefined
-      : dto.min_negotiation_qty === 0
-        ? null
-        : dto.min_negotiation_qty;
+      const minNegotiation =
+        dto.min_negotiation_qty === undefined
+          ? undefined
+          : dto.min_negotiation_qty === 0
+            ? null
+            : dto.min_negotiation_qty;
 
-    const nextStatus = deriveStockStatus(nextStock, product.status);
-    const updated = await this.db.product.update({
-      where: { id: productId },
-      data: {
-        ...(dto.name !== undefined ? { name: dto.name } : {}),
-        ...(dto.description !== undefined ? { description: dto.description } : {}),
-        ...(dto.reference_price !== undefined || dto.price !== undefined
-          ? { reference_price: Number(dto.reference_price ?? dto.price) }
-          : {}),
-        ...(stockValue !== undefined ? { stock_quantity: nextStock } : {}),
-        ...(dto.unit !== undefined ? { unit: dto.unit } : {}),
-        ...(dto.location !== undefined || dto.origin !== undefined
-          ? { location: dto.location ?? dto.origin ?? null }
-          : {}),
-        ...(dto.certification !== undefined ? { certification: dto.certification } : {}),
-        ...(categoryId !== undefined ? { category_id: categoryId } : {}),
-        ...(minNegotiation !== undefined ? { min_negotiation_qty: minNegotiation } : {}),
-        status: nextStatus,
-        is_active: nextStatus === ProductStatus.ACTIVE,
-      },
-    });
+      const nextStatus = deriveStockStatus(nextStock, product.status);
 
-    const appendedUrls = [
-      ...this.normalizeImageUrls(dto.image_urls as any),
-      ...files.map((file) => `/uploads/products/${file.filename}`),
-    ];
+      const appendedUrls = [
+        ...this.normalizeImageUrls(dto.image_urls as any),
+        ...files.map((file) => `/uploads/products/${file.filename}`),
+      ];
 
-    if (appendedUrls.length > 0) {
-      await this.db.attachment.createMany({
-        data: appendedUrls.map((url) => ({
-          url,
-          file_type: 'IMAGE',
-          target_id: productId,
-          target_type: TargetType.PRODUCT,
-        })),
+      const updated = await this.db.$transaction(async (tx) => {
+        const next = await tx.product.update({
+          where: { id: productId },
+          data: {
+            ...(dto.name !== undefined ? { name: dto.name } : {}),
+            ...(dto.description !== undefined ? { description: dto.description } : {}),
+            ...(dto.reference_price !== undefined
+              ? { reference_price: Number(dto.reference_price) }
+              : {}),
+            ...(dto.stock_quantity !== undefined ? { stock_quantity: nextStock } : {}),
+            ...(dto.unit !== undefined ? { unit: dto.unit } : {}),
+            ...(dto.location !== undefined ? { location: dto.location ?? null } : {}),
+            ...(dto.certification !== undefined ? { certification: dto.certification } : {}),
+            ...(categoryId !== undefined ? { category_id: categoryId } : {}),
+            ...(minNegotiation !== undefined ? { min_negotiation_qty: minNegotiation } : {}),
+            status: nextStatus,
+            is_active: nextStatus === ProductStatus.ACTIVE,
+          },
+        });
+
+        if (appendedUrls.length > 0) {
+          await tx.attachment.createMany({
+            data: appendedUrls.map((url) => ({
+              url,
+              file_type: 'IMAGE',
+              target_id: productId,
+              target_type: TargetType.PRODUCT,
+            })),
+          });
+        }
+
+        return next;
       });
-    }
 
-    return updated;
+      return updated;
+    } catch (err) {
+      await unlinkSafely(files, this.logger);
+      throw err;
+    }
   }
 
   // ─── DELETE /products/:id — Soft delete (preserves row + order history) ─
@@ -589,6 +647,14 @@ export class ProductsService {
   }
 
   // ─── GET /sellers/:id — Trang chi tiết người bán ────────────────────────
+  // Query plan: 3 round trips thay vì 6 sequential trước đây.
+  //   1) user.findUnique           — validate seller exists
+  //   2) parallel batch (4 query song song):
+  //        - attachment.findFirst  (avatar)
+  //        - product.findMany      (kèm category)
+  //        - orderItem aggregate    (totalSold của shop)
+  //        - review.findMany        (rating average)
+  //   3) attachment.findMany       (ảnh sản phẩm — cần productIds từ bước 2)
   async findSellerById(sellerId: string) {
     const seller = await this.db.user.findUnique({
       where: { id: sellerId, is_seller: true },
@@ -597,47 +663,42 @@ export class ProductsService {
 
     if (!seller) throw new NotFoundException('Người bán không tồn tại.');
 
-    // Avatar shop
-    const avatarAttachment = await this.db.attachment.findFirst({
-      where: { target_id: sellerId, target_type: 'AVATAR' },
-      select: { url: true },
-    });
-
-    // Tất cả sản phẩm đang bán
-    const products = await this.db.product.findMany({
-      where: { seller_id: sellerId, is_active: true },
-      orderBy: { created_at: 'desc' },
-      include: { category: true },
-    });
+    const [avatarAttachment, products, soldAggregate, reviews] = await Promise.all([
+      this.db.attachment.findFirst({
+        where: { target_id: sellerId, target_type: 'AVATAR' },
+        select: { url: true },
+      }),
+      this.db.product.findMany({
+        where: { seller_id: sellerId, is_active: true },
+        orderBy: { created_at: 'desc' },
+        include: { category: true },
+      }),
+      // Aggregate totalSold once instead of pulling rows + summing in JS.
+      this.db.orderItem.aggregate({
+        _sum: { quantity: true },
+        where: { order: { status: 'COMPLETED', seller_id: sellerId } },
+      }),
+      this.db.review.findMany({
+        where: { order: { seller_id: sellerId } },
+        select: { rating: true },
+      }),
+    ]);
 
     const productIds = products.map((p) => p.id);
 
-    // Ảnh các sản phẩm
-    const attachments = await this.db.attachment.findMany({
-      where: { target_type: 'PRODUCT', target_id: { in: productIds } },
-    });
+    // Now that we know which products to load images for, fetch them.
+    const attachments = productIds.length
+      ? await this.db.attachment.findMany({
+          where: { target_type: 'PRODUCT', target_id: { in: productIds } },
+        })
+      : [];
     const imageMap = attachments.reduce((acc, att) => {
       if (!acc[att.target_id]) acc[att.target_id] = [];
       acc[att.target_id].push(att.url);
       return acc;
     }, {} as Record<string, string[]>);
 
-    // Tổng lượt bán + rating trung bình của shop
-    const completedOrderItems = await this.db.orderItem.findMany({
-      where: {
-        product_id: { in: productIds },
-        order: { status: 'COMPLETED', seller_id: sellerId },
-      },
-    });
-    const totalSold = completedOrderItems.reduce(
-      (sum, i) => sum + Number(i.quantity),
-      0,
-    );
-
-    const reviews = await this.db.review.findMany({
-      where: { order: { seller_id: sellerId } },
-      select: { rating: true },
-    });
+    const totalSold = Number(soldAggregate._sum.quantity ?? 0);
     const avgRating =
       reviews.length > 0
         ? Number(

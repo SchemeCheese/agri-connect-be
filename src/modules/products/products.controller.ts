@@ -61,6 +61,12 @@ export class ProductsController {
     return this.productsService.findAllPublic();
   }
 
+  // Danh sách danh mục — FE dùng để render dropdown bằng id số. Phải đặt TRƯỚC :id.
+  @Get('categories')
+  async listCategories() {
+    return this.productsService.listCategories();
+  }
+
   // API lấy trang chi tiết người bán (public) — phải đặt TRƯỚC :id
   @Get('sellers/:id')
   async getSellerById(@Param('id') sellerId: string) {

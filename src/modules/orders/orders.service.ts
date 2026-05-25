@@ -176,15 +176,13 @@ export class OrdersService {
                         },
                     });
 
-                    // Tạo Payment
-                    await prisma.payment.create({
-                        data: {
-                            order_id: newOrder.id,
-                            payer_id: buyerId,
-                            amount: finalPrice,
-                            payment_method: dto.payment_method,
-                            status: PaymentStatus.UNPAID,
-                        },
+                    // Tạo Payment — ownership thuộc PaymentsService, OrdersService chỉ
+                    // hand off tx hiện hành để vẫn nằm trong cùng atomic transaction.
+                    await this.paymentsService.createInitialPayment(prisma, {
+                        orderId: newOrder.id,
+                        payerId: buyerId,
+                        amount: finalPrice,
+                        method: dto.payment_method,
                     });
 
                     results.push({
@@ -420,16 +418,13 @@ export class OrdersService {
         // Atomic: đồng thời cập nhật Order=COMPLETED và Payment=PAID
         // Với COD: đây là xác nhận đã trả tiền khi nhận hàng
         // Với Online: xác nhận đã nhận hàng (tiền đã trả từ trước)
-        await this.databaseService.$transaction([
-            this.databaseService.order.update({
+        await this.databaseService.$transaction(async (tx) => {
+            await tx.order.update({
                 where: { id: orderId },
                 data: { status: OrderStatus.COMPLETED },
-            }),
-            this.databaseService.payment.updateMany({
-                where: { order_id: orderId },
-                data: { status: PaymentStatus.PAID },
-            }),
-        ]);
+            });
+            await this.paymentsService.markPaid(tx, orderId);
+        });
 
         return { message: 'Đã xác nhận nhận hàng và thanh toán thành công.' };
     }
@@ -581,10 +576,7 @@ export class OrdersService {
                     where: { id: orderId },
                     data: { status: OrderStatus.RETURNED, note: issueNote },
                 });
-                await tx.payment.updateMany({
-                    where: { order_id: orderId },
-                    data: { status: PaymentStatus.FAILED },
-                });
+                await this.paymentsService.markFailed(tx, orderId);
             });
             return { message: 'Đơn COD đã được đánh dấu RETURNED. Không phát sinh hoàn tiền.' };
         }
@@ -602,10 +594,7 @@ export class OrdersService {
                     where: { id: orderId },
                     data: { status: OrderStatus.REFUND_PENDING, note: issueNote },
                 });
-                await tx.payment.updateMany({
-                    where: { order_id: orderId },
-                    data: { status: PaymentStatus.REFUNDING },
-                });
+                await this.paymentsService.markRefunding(tx, orderId);
             });
 
             try {
@@ -638,10 +627,7 @@ export class OrdersService {
                 data: { status: OrderStatus.ISSUE_REPORTED, note: issueNote },
             });
             if (paymentAlreadyPaid) {
-                await tx.payment.updateMany({
-                    where: { order_id: orderId },
-                    data: { status: PaymentStatus.REFUNDING },
-                });
+                await this.paymentsService.markRefunding(tx, orderId);
             }
         });
         return { message: 'Đã ghi nhận sự cố, đang chờ xử lý.' };
@@ -675,16 +661,17 @@ export class OrdersService {
         const sellerName = order.seller?.full_name ?? 'Người bán';
 
         // Atomic: Order=FAILED + cập nhật Payment theo loại
-        await this.databaseService.$transaction([
-            this.databaseService.order.update({
+        await this.databaseService.$transaction(async (tx) => {
+            await tx.order.update({
                 where: { id: orderId },
                 data: { status: OrderStatus.FAILED },
-            }),
-            this.databaseService.payment.updateMany({
-                where: { order_id: orderId },
-                data: { status: newPaymentStatus },
-            }),
-        ]);
+            });
+            if (isPrepaid) {
+                await this.paymentsService.markRefunding(tx, orderId);
+            } else {
+                await this.paymentsService.markFailed(tx, orderId);
+            }
+        });
 
         try {
             if (order.buyer?.email) {
@@ -721,10 +708,9 @@ export class OrdersService {
                     Number(order.final_total_price),
                     'Người bán xác nhận thất lạc hàng',
                 );
-                await this.databaseService.payment.updateMany({
-                    where: { order_id: orderId },
-                    data: { status: PaymentStatus.REFUNDED },
-                });
+                // refundMomoTransaction đã flip Payment=REFUNDED trong transaction nội bộ;
+                // call này là safety mirror nếu vì lý do gì đó status vẫn ở REFUNDING.
+                await this.paymentsService.markRefunded(this.databaseService, orderId);
             } catch (error) {
                 this.logger.error(
                     `Lỗi hoàn tiền MoMo cho đơn ${orderId}: ${(error as Error).message}. Payment giữ ở REFUNDING để admin xử lý lại.`,
@@ -842,16 +828,13 @@ export class OrdersService {
             return { message: 'Phương thức đã là COD, không thay đổi gì.', orderId };
         }
 
-        await this.databaseService.$transaction([
-            this.databaseService.order.update({
+        await this.databaseService.$transaction(async (tx) => {
+            await tx.order.update({
                 where: { id: orderId },
                 data: { payment_method: newMethod },
-            }),
-            this.databaseService.payment.updateMany({
-                where: { order_id: orderId },
-                data: { payment_method: newMethod },
-            }),
-        ]);
+            });
+            await this.paymentsService.changeMethod(tx, orderId, newMethod);
+        });
 
         return {
             message: 'Đã chuyển sang thanh toán khi nhận hàng (COD). Người bán sẽ xác nhận đơn.',
@@ -887,16 +870,13 @@ export class OrdersService {
         }
 
         const ids = stale.map((o) => o.id);
-        await this.databaseService.$transaction([
-            this.databaseService.order.updateMany({
+        await this.databaseService.$transaction(async (tx) => {
+            await tx.order.updateMany({
                 where: { id: { in: ids } },
                 data: { status: OrderStatus.CANCELLED },
-            }),
-            this.databaseService.payment.updateMany({
-                where: { order_id: { in: ids }, status: PaymentStatus.UNPAID },
-                data: { status: PaymentStatus.FAILED },
-            }),
-        ]);
+            });
+            await this.paymentsService.batchFailUnpaid(tx, ids);
+        });
 
         this.logger.log(`[cron] Auto-cancelled ${ids.length} unpaid MoMo orders older than ${UNPAID_MOMO_ORDER_TIMEOUT_HOURS}h: ${ids.join(', ')}`);
     }
