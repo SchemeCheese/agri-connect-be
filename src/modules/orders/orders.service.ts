@@ -20,10 +20,40 @@ const REPORT_ISSUE_DELAY_DAYS = 3;
 const POST_DELIVERY_DISPUTE_WINDOW_DAYS = 3;
 // Đơn MoMo chờ thanh toán quá ngưỡng này sẽ bị cron tự cancel.
 const UNPAID_MOMO_ORDER_TIMEOUT_HOURS = 24;
+// Cache TTL cho seller dashboard — đủ ngắn để số liệu vẫn "gần real-time",
+// đủ dài để tránh re-aggregate khi seller F5 dashboard liên tục.
+const SELLER_DASHBOARD_CACHE_TTL_MS = 60_000;
+
+type SellerProductStatRow = {
+    id: string;
+    name: string;
+    sold: number;
+    avg_rating: number | null;
+    review_count: number;
+};
+
+type SellerMonthlyRevenueRow = {
+    month: string;
+    revenue: number | string | null;
+};
+
+type SellerDashboardSnapshot = {
+    totalRevenue: number;
+    totalOrders: number;
+    activeProducts: number;
+    revenueByMonth: { month: string; revenue: number }[];
+    top3BestSelling: { id: string; name: string; sold: number; avgRating: number | null; reviewCount: number }[];
+    top3NeedImprovement: { id: string; name: string; sold: number; avgRating: number | null; reviewCount: number }[];
+};
 
 @Injectable()
 export class OrdersService {
     private readonly logger = new Logger(OrdersService.name);
+
+    // In-memory snapshot cache per seller. Map vì số seller hữu hạn, không cần
+    // Redis cho stage hiện tại; eviction phụ thuộc TTL chứ không có size cap —
+    // chấp nhận được vì payload mỗi entry chỉ ~vài KB.
+    private readonly dashboardCache = new Map<string, { value: SellerDashboardSnapshot; expiresAt: number }>();
 
     constructor(
         private readonly databaseService: DatabaseService,
@@ -882,98 +912,144 @@ export class OrdersService {
     }
 
     // =====================================================
-    // SELLER: Dashboard tổng quan
+    // SELLER: Summary tổng quan (revenue + orderCount)
+    //
+    // Push toàn bộ aggregation xuống Postgres: COUNT cho tổng đơn,
+    // SUM(final_total_price) cho doanh thu — thay vì tải toàn bộ rows
+    // về Node rồi reduce. Khi seller có hàng nghìn đơn, đây là khác biệt
+    // lớn nhất về performance.
     // =====================================================
-    async getSellerDashboard(sellerId: string) {
-        // 1. Tổng đơn hàng
-        const totalOrders = await this.databaseService.order.count({
-            where: { seller_id: sellerId },
-        });
+    async getSellerStats(sellerId: string): Promise<{ revenue: number; orderCount: number }> {
+        const [orderCount, revenueAgg] = await Promise.all([
+            this.databaseService.order.count({
+                where: { seller_id: sellerId },
+            }),
+            this.databaseService.order.aggregate({
+                where: { seller_id: sellerId, status: OrderStatus.COMPLETED },
+                _sum: { final_total_price: true },
+            }),
+        ]);
 
-        // 2. Tổng doanh thu (chỉ đơn COMPLETED)
-        const completedOrders = await this.databaseService.order.findMany({
-            where: { seller_id: sellerId, status: OrderStatus.COMPLETED },
-            select: { final_total_price: true, created_at: true },
-        });
-        const totalRevenue = completedOrders.reduce(
-            (sum, o) => sum + Number(o.final_total_price),
-            0,
-        );
+        return {
+            revenue: Number(revenueAgg._sum.final_total_price ?? 0),
+            orderCount,
+        };
+    }
 
-        // 3. Sản phẩm đang bán (is_active = true)
-        const activeProducts = await this.databaseService.product.count({
-            where: { seller_id: sellerId, is_active: true },
-        });
+    // =====================================================
+    // SELLER: Dashboard tổng quan
+    //
+    // Query plan:
+    //   1) Cache lookup (60s TTL) — short-circuit khi seller F5 liên tục.
+    //   2) Promise.all 4 query song song:
+    //        - getSellerStats        → count + SUM(final_total_price)
+    //        - product.count          → activeProducts
+    //        - $queryRaw DATE_TRUNC   → revenue theo tháng (gom group tại DB)
+    //        - $queryRaw CTE          → sold + avg_rating + review_count theo product_id
+    //   3) JS chỉ làm: pad missing months + sort top3 (≤ |products| rows).
+    //
+    // Trước đây: 4 sequential queries kéo về toàn bộ orders/orderItems/reviews
+    // (mỗi review include nested order + order_items) rồi reduce trong Node.
+    // Với seller có lịch sử bán dài, query này là điểm nóng N+1/over-fetch.
+    // =====================================================
+    async getSellerDashboard(sellerId: string): Promise<SellerDashboardSnapshot> {
+        const cached = this.dashboardCache.get(sellerId);
+        if (cached && cached.expiresAt > Date.now()) {
+            return cached.value;
+        }
 
-        // 4. Doanh thu theo tháng (12 tháng gần nhất)
+        // Lower bound = đầu tháng của (now - 11 tháng). Tạo bằng Date constructor
+        // local-time để khớp với label `YYYY-MM` mà FE đang dùng.
         const now = new Date();
+        const monthlyLowerBound = new Date(now.getFullYear(), now.getMonth() - 11, 1);
+
+        const [stats, activeProducts, monthlyRevenueRows, productStatRows] = await Promise.all([
+            this.getSellerStats(sellerId),
+            this.databaseService.product.count({
+                where: { seller_id: sellerId, is_active: true },
+            }),
+            // DATE_TRUNC tại múi giờ VN để tháng khớp lịch người dùng,
+            // không bị lệch khi server chạy ở UTC (Railway).
+            this.databaseService.$queryRaw<SellerMonthlyRevenueRow[]>`
+                SELECT
+                    TO_CHAR(
+                        DATE_TRUNC('month', "created_at" AT TIME ZONE 'Asia/Ho_Chi_Minh'),
+                        'YYYY-MM'
+                    ) AS month,
+                    SUM("final_total_price")::float AS revenue
+                FROM "Order"
+                WHERE "seller_id" = ${sellerId}
+                    AND "status" = 'COMPLETED'
+                    AND "created_at" >= ${monthlyLowerBound}
+                GROUP BY 1
+            `,
+            // CTE 1 (sold_stats): chỉ tính qua đơn COMPLETED → khớp định nghĩa "đã bán".
+            // CTE 2 (rating_stats): mỗi review nhân với số product_id của order
+            //   (giữ semantics cũ: rating của order áp lên TỪNG product trong order đó).
+            // Outer LEFT JOIN: product chưa có đơn / chưa có review vẫn xuất hiện
+            //   với sold=0, avg_rating=NULL — cần thiết cho nhóm "need improvement
+            //   without rating".
+            this.databaseService.$queryRaw<SellerProductStatRow[]>`
+                WITH sold_stats AS (
+                    SELECT oi."product_id", SUM(oi."quantity")::float AS sold
+                    FROM "OrderItem" oi
+                    JOIN "Order" o ON o."id" = oi."order_id"
+                    WHERE o."seller_id" = ${sellerId}
+                        AND o."status" = 'COMPLETED'
+                    GROUP BY oi."product_id"
+                ),
+                rating_stats AS (
+                    SELECT oi."product_id",
+                           AVG(r."rating")::float AS avg_rating,
+                           COUNT(r."id")::int AS review_count
+                    FROM "Review" r
+                    JOIN "Order" o ON o."id" = r."order_id"
+                    JOIN "OrderItem" oi ON oi."order_id" = o."id"
+                    WHERE o."seller_id" = ${sellerId}
+                    GROUP BY oi."product_id"
+                )
+                SELECT p."id",
+                       p."name",
+                       COALESCE(s.sold, 0)::float AS sold,
+                       rs.avg_rating,
+                       COALESCE(rs.review_count, 0)::int AS review_count
+                FROM "Product" p
+                LEFT JOIN sold_stats s ON s."product_id" = p."id"
+                LEFT JOIN rating_stats rs ON rs."product_id" = p."id"
+                WHERE p."seller_id" = ${sellerId}
+            `,
+        ]);
+
+        // Pad: SQL chỉ trả các tháng có dữ liệu. Reconstruct đủ 12 tháng (oldest → newest)
+        // để FE vẽ biểu đồ liên tục, không bị "đứt" trục thời gian.
+        const monthlyMap = new Map(
+            monthlyRevenueRows.map((r) => [r.month, Number(r.revenue ?? 0)]),
+        );
         const revenueByMonth: { month: string; revenue: number }[] = [];
         for (let i = 11; i >= 0; i--) {
             const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
-            const start = new Date(d.getFullYear(), d.getMonth(), 1);
-            const end = new Date(d.getFullYear(), d.getMonth() + 1, 1);
-            const monthLabel = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
-            const monthRevenue = completedOrders
-                .filter((o) => o.created_at >= start && o.created_at < end)
-                .reduce((sum, o) => sum + Number(o.final_total_price), 0);
-            revenueByMonth.push({ month: monthLabel, revenue: monthRevenue });
+            const label = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+            revenueByMonth.push({ month: label, revenue: monthlyMap.get(label) ?? 0 });
         }
 
-        // 5. Top 3 bán chạy nhất & top 3 cần cải thiện
-        const orderItems = await this.databaseService.orderItem.findMany({
-            where: {
-                order: { seller_id: sellerId, status: OrderStatus.COMPLETED },
-            },
-            select: { product_id: true, quantity: true },
-        });
+        const productStats = productStatRows.map((row) => ({
+            id: row.id,
+            name: row.name,
+            sold: Number(row.sold),
+            avgRating:
+                row.avg_rating !== null
+                    ? Number(Number(row.avg_rating).toFixed(1))
+                    : null,
+            reviewCount: Number(row.review_count),
+        }));
 
-        // Tổng số lượng bán theo product_id
-        const soldMap: Record<string, number> = {};
-        for (const item of orderItems) {
-            soldMap[item.product_id] = (soldMap[item.product_id] ?? 0) + Number(item.quantity);
-        }
-
-        // Rating trung bình theo product_id
-        const reviewsRaw = await this.databaseService.review.findMany({
-            where: {
-                order: { seller_id: sellerId },
-            },
-            include: {
-                order: {
-                    include: { order_items: { select: { product_id: true } } },
-                },
-            },
-        });
-        const ratingMap: Record<string, number[]> = {};
-        for (const r of reviewsRaw) {
-            for (const item of r.order.order_items) {
-                if (!ratingMap[item.product_id]) ratingMap[item.product_id] = [];
-                ratingMap[item.product_id].push(r.rating);
-            }
-        }
-
-        // Lấy tất cả sản phẩm của seller
-        const allProducts = await this.databaseService.product.findMany({
-            where: { seller_id: sellerId },
-            select: { id: true, name: true, reference_price: true, is_active: true },
-        });
-
-        const productStats = allProducts.map((p) => {
-            const sold = soldMap[p.id] ?? 0;
-            const ratings = ratingMap[p.id] ?? [];
-            const avgRating =
-                ratings.length > 0
-                    ? Number((ratings.reduce((a, b) => a + b, 0) / ratings.length).toFixed(1))
-                    : null;
-            return { id: p.id, name: p.name, sold, avgRating, reviewCount: ratings.length };
-        });
-
-        // Top 3 bán chạy
         const top3BestSelling = [...productStats]
             .sort((a, b) => b.sold - a.sold)
             .slice(0, 3);
 
-        // Top 3 cần cải thiện: có đánh giá thì ưu tiên rating thấp, không có đánh giá thì ít bán nhất
+        // "Need improvement": ưu tiên có-đánh-giá-rating-thấp;
+        // nếu thiếu, lấp bằng chưa-có-đánh-giá-bán-ít-nhất.
+        // Khớp đúng logic cũ trước refactor để FE không cần đổi.
         const withRating = productStats.filter((p) => p.avgRating !== null);
         const withoutRating = productStats.filter((p) => p.avgRating === null);
         const top3NeedImprovement = [
@@ -981,13 +1057,20 @@ export class OrdersService {
             ...withoutRating.sort((a, b) => a.sold - b.sold),
         ].slice(0, 3);
 
-        return {
-            totalRevenue,
-            totalOrders,
+        const snapshot: SellerDashboardSnapshot = {
+            totalRevenue: stats.revenue,
+            totalOrders: stats.orderCount,
             activeProducts,
             revenueByMonth,
             top3BestSelling,
             top3NeedImprovement,
         };
+
+        this.dashboardCache.set(sellerId, {
+            value: snapshot,
+            expiresAt: Date.now() + SELLER_DASHBOARD_CACHE_TTL_MS,
+        });
+
+        return snapshot;
     }
 }
