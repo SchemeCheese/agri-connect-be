@@ -94,8 +94,23 @@ export class OrdersService {
             }
         }
 
+        // Batched seller validation — 1 round-trip thay vì N. Trước đây mỗi shop
+        // gọi user.findUnique() bên trong $transaction, với proxy DB chậm (Railway)
+        // 5 shop dễ vượt timeout 5s mặc định → "Transaction already closed".
+        const sellerIds = [...new Set(dto.seller_orders.map((so) => so.seller_id))];
+        const sellers = await this.databaseService.user.findMany({
+            where: { id: { in: sellerIds } },
+            select: { id: true, is_seller: true },
+        });
+        const sellerMap = new Map(sellers.map((s) => [s.id, s]));
+        for (const so of dto.seller_orders) {
+            const s = sellerMap.get(so.seller_id);
+            if (!s) throw new NotFoundException(`Người bán (ID: ${so.seller_id}) không tồn tại.`);
+            if (!s.is_seller) throw new BadRequestException(`ID ${so.seller_id} không phải SELLER.`);
+        }
+
         try {
-            const createdOrders = await this.databaseService.$transaction(async (prisma) => {
+            const { sessionId, results: createdOrders } = await this.databaseService.$transaction(async (prisma) => {
                 const results: {
                     seller_id: string;
                     order_id: string;
@@ -104,20 +119,16 @@ export class OrdersService {
                     final: number;
                 }[] = [];
 
+                // Tạo CheckoutSession trước để mỗi Order FK tới nó. total_amount=0
+                // placeholder, cập nhật lại sau khi cộng đủ các shop (single-shop =
+                // session 1 đơn, vẫn dùng chung path).
+                const session = await prisma.checkoutSession.create({
+                    data: { buyer_id: buyerId, total_amount: 0 },
+                });
+
                 for (const sellerOrder of dto.seller_orders) {
                     const { seller_id: sellerId, items, voucher_code } = sellerOrder;
-
-                    // Xác thực seller tồn tại
-                    const seller = await prisma.user.findUnique({
-                        where: { id: sellerId },
-                        select: { id: true, is_seller: true },
-                    });
-                    if (!seller) {
-                        throw new NotFoundException(`Người bán (ID: ${sellerId}) không tồn tại.`);
-                    }
-                    if (!seller.is_seller) {
-                        throw new BadRequestException(`ID ${sellerId} không phải SELLER.`);
-                    }
+                    // Seller đã được validate batched bên ngoài $transaction (xem sellerMap ở trên).
 
                     // Tính subtotal
                     const subtotal = items.reduce(
@@ -189,6 +200,7 @@ export class OrdersService {
                         data: {
                             buyer_id: buyerId,
                             seller_id: sellerId,
+                            checkout_session_id: session.id,
                             shipping_address: dto.shipping_address,
                             payment_method: dto.payment_method,
                             note: dto.note,
@@ -224,13 +236,26 @@ export class OrdersService {
                     });
                 }
 
-                return results;
+                // Cập nhật total_amount thật sau khi đã cộng đủ các shop.
+                const grandTotal = results.reduce((sum, o) => sum + o.final, 0);
+                await prisma.checkoutSession.update({
+                    where: { id: session.id },
+                    data: { total_amount: grandTotal },
+                });
+
+                return { sessionId: session.id, results };
+            }, {
+                // Railway proxy có latency ~100-300ms/query; checkout nhiều shop dễ vượt
+                // default 5s. 15s đủ rộng cho giỏ ~10 shop mà không che giấu deadlock thật.
+                timeout: 15_000,
+                maxWait: 5_000,
             });
 
             const totalPaid = createdOrders.reduce((sum, o) => sum + o.final, 0);
 
             return {
                 message: 'Đặt hàng thành công!',
+                checkout_session_id: sessionId,
                 order_ids: createdOrders.map((o) => o.order_id),
                 total_paid: totalPaid,
                 seller_orders: createdOrders,
@@ -628,11 +653,23 @@ export class OrdersService {
             });
 
             try {
-                await this.paymentsService.refundMomoTransaction(
-                    orderId,
-                    Number(order.final_total_price),
-                    issueNote,
+                this.logger.log(
+                    `Refund MoMo order ${orderId} (session=${order.checkout_session_id ?? 'legacy'}) amount=${order.final_total_price}`,
                 );
+                // Đơn mới thuộc CheckoutSession → partial refund theo session; đơn cũ → legacy.
+                if (order.checkout_session_id) {
+                    await this.paymentsService.refundPayment(
+                        order.checkout_session_id,
+                        Number(order.final_total_price),
+                        { orderId, reason: issueNote },
+                    );
+                } else {
+                    await this.paymentsService.refundMomoTransaction(
+                        orderId,
+                        Number(order.final_total_price),
+                        issueNote,
+                    );
+                }
                 return {
                     message: 'Đã hoàn tiền MoMo thành công. Đơn chuyển sang REFUNDED.',
                     refunded: true,
@@ -733,14 +770,25 @@ export class OrdersService {
         // Hoàn tiền thật qua MoMo nếu đã trả trước bằng MoMo
         if (isPrepaid && order.payment_method === PaymentMethod.MOMO) {
             try {
-                await this.paymentsService.refundMomoTransaction(
-                    orderId,
-                    Number(order.final_total_price),
-                    'Người bán xác nhận thất lạc hàng',
+                this.logger.log(
+                    `Refund MoMo order ${orderId} (session=${order.checkout_session_id ?? 'legacy'}) — seller confirmed lost`,
                 );
-                // refundMomoTransaction đã flip Payment=REFUNDED trong transaction nội bộ;
-                // call này là safety mirror nếu vì lý do gì đó status vẫn ở REFUNDING.
-                await this.paymentsService.markRefunded(this.databaseService, orderId);
+                // Đơn mới thuộc CheckoutSession → partial refund theo session; đơn cũ → legacy.
+                if (order.checkout_session_id) {
+                    await this.paymentsService.refundPayment(
+                        order.checkout_session_id,
+                        Number(order.final_total_price),
+                        { orderId, reason: 'Người bán xác nhận thất lạc hàng' },
+                    );
+                } else {
+                    await this.paymentsService.refundMomoTransaction(
+                        orderId,
+                        Number(order.final_total_price),
+                        'Người bán xác nhận thất lạc hàng',
+                    );
+                    // Legacy: safety mirror nếu status còn REFUNDING.
+                    await this.paymentsService.markRefunded(this.databaseService, orderId);
+                }
             } catch (error) {
                 this.logger.error(
                     `Lỗi hoàn tiền MoMo cho đơn ${orderId}: ${(error as Error).message}. Payment giữ ở REFUNDING để admin xử lý lại.`,

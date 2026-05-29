@@ -1,9 +1,13 @@
 -- 1. Enum
-CREATE TYPE "ProductStatus" AS ENUM ('ACTIVE', 'OUT_OF_STOCK', 'INACTIVE', 'DELETED');
+DO $$ BEGIN
+  CREATE TYPE "ProductStatus" AS ENUM ('ACTIVE', 'OUT_OF_STOCK', 'INACTIVE', 'DELETED');
+EXCEPTION
+  WHEN duplicate_object THEN NULL;
+END $$;
 
 -- 2. Column (NOT NULL with default so existing rows are valid immediately)
 ALTER TABLE "Product"
-  ADD COLUMN "status" "ProductStatus" NOT NULL DEFAULT 'ACTIVE';
+  ADD COLUMN IF NOT EXISTS "status" "ProductStatus" NOT NULL DEFAULT 'ACTIVE';
 
 -- 3. Backfill from current is_active + stock_quantity. Older rows cannot
 -- distinguish "seller-deactivated" from "auto out-of-stock", so we map:

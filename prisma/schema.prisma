@@ -41,6 +41,11 @@ enum PaymentMethod {
   ZALOPAY  // ZaloPay
 }
 
+enum PaymentType {
+  PAYMENT  // Bản ghi thu tiền (mặc định)
+  REFUND   // Bản ghi hoàn tiền — log riêng để đối soát
+}
+
 enum TargetType {
   PRODUCT
   AVATAR
@@ -130,6 +135,7 @@ model User {
   verifications  Verification[]
   recommendation_cache RecommendationCache?
   ai_sessions    AISession[]
+  checkout_sessions CheckoutSession[]
 }
 
 model Profile {
@@ -207,11 +213,41 @@ model Order {
   voucher_id        String?       // Voucher đã áp dụng
   voucher           Voucher?      @relation(fields: [voucher_id], references: [id])
   discount_amount   Decimal?      @db.Decimal(10, 2)  // Số tiền đã giảm
+  // Nhóm nhiều đơn (nhiều shop) vào 1 lần thanh toán MoMo. Nullable để tương thích
+  // ngược với đơn cũ; checkout mới luôn gán (single-shop = session 1 đơn).
+  checkout_session_id String?
+  checkout_session    CheckoutSession? @relation(fields: [checkout_session_id], references: [id])
   created_at        DateTime      @default(now())
   updated_at        DateTime      @updatedAt
   order_items       OrderItem[]
   payments          Payment[]
   reviews           Review[]
+
+  @@index([checkout_session_id])
+}
+
+// Nhóm thanh toán cho giỏ nhiều shop: 1 CheckoutSession ↔ N Order, nhưng chỉ
+// 1 giao dịch MoMo. MoMo nhận session.id làm orderId để dedupe cho cả nhóm.
+enum CheckoutSessionStatus {
+  PENDING
+  PAID
+  FAILED
+  PARTIALLY_REFUNDED  // Một phần đơn trong nhóm đã hoàn tiền
+  REFUNDED            // Tất cả đơn trong nhóm đã hoàn tiền
+}
+
+model CheckoutSession {
+  id            String                @id @default(cuid())
+  buyer_id      String
+  buyer         User                  @relation(fields: [buyer_id], references: [id])
+  total_amount  Decimal               @db.Decimal(10, 2)
+  status        CheckoutSessionStatus @default(PENDING)
+  momo_trans_id String?               // MoMo transId của giao dịch nhóm (sau IPN thành công)
+  created_at    DateTime              @default(now())
+  updated_at    DateTime              @updatedAt
+  orders        Order[]
+
+  @@index([buyer_id, created_at])
 }
 
 model OrderItem {
@@ -233,8 +269,10 @@ model Payment {
   amount            Decimal       @db.Decimal(10, 2)
   payment_method    PaymentMethod
   status            PaymentStatus @default(UNPAID)
+  payment_type      PaymentType   @default(PAYMENT)  // PAYMENT = thu tiền, REFUND = bản ghi hoàn tiền
   payment_proof_url String?
   transaction_ref   String?       // Mã giao dịch từ MoMo/ZaloPay/QR
+  momo_trans_id     String?       // MoMo transId từ IPN thành công — dùng cho refund
   created_at        DateTime      @default(now())
   updated_at        DateTime      @updatedAt
 }

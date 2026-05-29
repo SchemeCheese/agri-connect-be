@@ -1,6 +1,6 @@
 import { Injectable, BadRequestException, ForbiddenException, NotFoundException, Logger } from '@nestjs/common';
 import { DatabaseService } from '../../database/database.service';
-import { PaymentStatus, PaymentMethod, OrderStatus, Prisma } from '@prisma/client';
+import { PaymentStatus, PaymentMethod, PaymentType, OrderStatus, CheckoutSessionStatus, Prisma } from '@prisma/client';
 import axios from 'axios';
 import * as crypto from 'crypto';
 
@@ -125,33 +125,53 @@ export class PaymentsService {
     return crypto.createHmac('sha256', secretKey).update(raw).digest('hex');
   }
 
-  async createMomoPayment(buyerId: string, orderId: string) {
-    const order = await this.db.order.findUnique({
-      where: { id: orderId },
-      include: { payments: true },
+  /**
+   * Resolve an incoming id to a CheckoutSession. Accepts either a session id
+   * directly (new flow) or a legacy order id whose Order is linked to a session
+   * (so callers still sending order_id keep working). Throws if neither resolves.
+   */
+  private async resolveCheckoutSession(id: string) {
+    let session = await this.db.checkoutSession.findUnique({
+      where: { id },
+      include: { orders: { include: { payments: true } } },
     });
+    if (!session) {
+      const order = await this.db.order.findUnique({
+        where: { id },
+        select: { checkout_session_id: true },
+      });
+      if (order?.checkout_session_id) {
+        session = await this.db.checkoutSession.findUnique({
+          where: { id: order.checkout_session_id },
+          include: { orders: { include: { payments: true } } },
+        });
+      }
+    }
+    return session;
+  }
 
-    if (!order) throw new NotFoundException('Đơn hàng không tồn tại');
-    if (order.buyer_id !== buyerId) throw new ForbiddenException('Bạn không sở hữu đơn hàng này');
-    if (order.payment_method !== PaymentMethod.MOMO) {
-      throw new BadRequestException('Đơn hàng này không chọn phương thức MoMo');
+  async createMomoPayment(buyerId: string, checkoutSessionId: string) {
+    const session = await this.resolveCheckoutSession(checkoutSessionId);
+    if (!session) throw new NotFoundException('Phiên thanh toán không tồn tại');
+    if (session.buyer_id !== buyerId) throw new ForbiddenException('Bạn không sở hữu phiên thanh toán này');
+    if (session.orders.length === 0) throw new BadRequestException('Phiên thanh toán không có đơn hàng');
+    if (session.orders.some((o) => o.payment_method !== PaymentMethod.MOMO)) {
+      throw new BadRequestException('Phiên này có đơn không chọn phương thức MoMo');
+    }
+    if (session.status === CheckoutSessionStatus.PAID) {
+      return { message: 'Phiên đã thanh toán MoMo', payUrl: null };
     }
 
-    // Lấy payment record (được tạo ở bước checkout)
-    const payment = order.payments?.[0];
-    if (!payment) throw new NotFoundException('Chưa có bản ghi thanh toán cho đơn này');
-    if (payment.status === PaymentStatus.PAID) {
-      return { message: 'Đơn đã thanh toán MoMo', payUrl: null };
-    }
-
-    const amount = Number(payment.amount);
+    // Tổng tiền cả nhóm (nhiều shop) → 1 giao dịch MoMo duy nhất.
+    const amount = Math.round(Number(session.total_amount));
     const { partnerCode, accessKey, secretKey, endpoint, redirectUrl, ipnUrl } = this.getMomoConfig();
 
-    // MoMo dedupe theo orderId — phải unique mỗi lần gen QR. Order.id là CUID
-    // (không chứa dấu '-'), nên IPN/return chỉ cần split('-')[0] để lấy lại original.
-    const momoOrderId = `${orderId}-${Date.now()}`;
+    // Gửi session.id làm MoMo orderId — IPN/return trả về chính id này để resolve
+    // cả nhóm. MoMo dedupe theo orderId; case đã PAID đã early-return ở trên, còn
+    // case UNPAID lâu sẽ do cron cancelStaleUnpaidMomoOrders (24h) dọn dẹp.
+    const momoOrderId = session.id;
     const requestId = `${Date.now()}`;
-    const orderInfo = `Thanh toan don hang ${orderId}`;
+    const orderInfo = `Thanh toan ${session.orders.length} don hang`;
     const requestType = 'captureWallet';
     const extraData = '';
 
@@ -178,7 +198,7 @@ export class PaymentsService {
     };
 
     this.logger.log(
-      `[MoMo CREATE] order=${orderId} amount=${amount} ipnUrl="${ipnUrl}" redirectUrl="${redirectUrl}"`,
+      `[MoMo CREATE] session=${momoOrderId} orders=${session.orders.length} amount=${amount} ipnUrl="${ipnUrl}"`,
     );
     const response = await axios.post(endpoint, payload, { headers: { 'Content-Type': 'application/json' } });
     const data = response.data as any;
@@ -188,13 +208,15 @@ export class PaymentsService {
       throw new BadRequestException(data?.message || 'Không tạo được giao dịch MoMo');
     }
 
-    // Lưu transaction_ref (payUrl requestId) để tiện tracking
-    await this.db.payment.update({
-      where: { id: payment.id },
+    // Lưu transaction_ref (payUrl/deeplink) lên mọi payment trong nhóm để tiện tracking
+    const orderIds = session.orders.map((o) => o.id);
+    await this.db.payment.updateMany({
+      where: { order_id: { in: orderIds } },
       data: { transaction_ref: data.payUrl ?? data.deeplink ?? requestId },
     });
 
     return {
+      checkoutSessionId: session.id,
       payUrl: data.payUrl,
       deeplink: data.deeplink,
       qrCodeUrl: data.qrCodeUrl,
@@ -227,10 +249,10 @@ export class PaymentsService {
       throw new BadRequestException('Invalid signature');
     }
 
-    // Only process success once. MoMo orderId là `${realOrderId}-${ts}` — tách lại id gốc.
+    // ipn.orderId IS the CheckoutSession id (or legacy order id). markMomoPaid
+    // resolves which and is idempotent — duplicate IPN is a safe no-op.
     if (ipn.resultCode === 0) {
-      const realOrderId = ipn.orderId.split('-')[0];
-      await this.markPaymentSucceeded(realOrderId, ipn.transId);
+      await this.markMomoPaid(ipn.orderId, String(ipn.transId));
     }
 
     return { resultCode: 0, message: 'OK' };
@@ -255,16 +277,14 @@ export class PaymentsService {
    */
   async handleMomoReturn(query: Record<string, string>): Promise<string> {
     const feBase = process.env.FRONTEND_URL || 'http://localhost:3000';
-    // MoMo trả về `${realOrderId}-${ts}` ở query.orderId — giữ composite để tính
-    // signature, còn DB lookup + FE redirect dùng realOrderId.
+    // query.orderId IS the real DB orderId (no composite suffix anymore).
     const orderId = query.orderId;
     if (!orderId) return `${feBase}/payment/failed?reason=missing_orderId`;
-    const realOrderId = orderId.split('-')[0];
 
     const { accessKey, secretKey, partnerCode } = this.getMomoConfig();
     if (query.partnerCode && query.partnerCode !== partnerCode) {
       this.logger.warn(`Return partnerCode mismatch: ${query.partnerCode}`);
-      return `${feBase}/payment/failed?orderId=${realOrderId}&reason=partner_mismatch`;
+      return `${feBase}/payment/failed?orderId=${orderId}&reason=partner_mismatch`;
     }
 
     // MoMo signs return-URL fields in the same alphabetical order as the request
@@ -287,15 +307,15 @@ export class PaymentsService {
     const resultCode = Number(query.resultCode ?? -1);
     if (resultCode === 0 && query.transId) {
       try {
-        await this.markPaymentSucceeded(realOrderId, query.transId);
+        await this.markMomoPaid(orderId, String(query.transId));
       } catch (err) {
-        // If Payment row not found yet (very unusual race), let IPN handle it.
-        this.logger.warn(`markPaymentSucceeded from return failed for ${realOrderId}: ${(err as Error).message}`);
+        // If session/payment not found yet (very unusual race), let IPN handle it.
+        this.logger.warn(`markMomoPaid from return failed for ${orderId}: ${(err as Error).message}`);
       }
-      return `${feBase}/payment/success?orderId=${realOrderId}&transId=${encodeURIComponent(query.transId)}&amount=${encodeURIComponent(query.amount ?? '')}`;
+      return `${feBase}/payment/success?orderId=${orderId}&transId=${encodeURIComponent(query.transId)}&amount=${encodeURIComponent(query.amount ?? '')}`;
     }
 
-    return `${feBase}/payment/failed?orderId=${realOrderId}&resultCode=${resultCode}&message=${encodeURIComponent(query.message ?? '')}`;
+    return `${feBase}/payment/failed?orderId=${orderId}&resultCode=${resultCode}&message=${encodeURIComponent(query.message ?? '')}`;
   }
 
   /**
@@ -314,11 +334,63 @@ export class PaymentsService {
 
       await tx.payment.update({
         where: { id: payment.id },
-        data: { status: PaymentStatus.PAID, transaction_ref: transId },
+        data: {
+          status: PaymentStatus.PAID,
+          transaction_ref: transId,
+          momo_trans_id: String(transId),
+        },
       });
       await tx.order.update({
         where: { id: orderId },
         data: { status: OrderStatus.CONFIRMED },
+      });
+    });
+  }
+
+  /**
+   * Dispatcher cho MoMo "payment cleared": id có thể là CheckoutSession id (flow
+   * mới, nhóm nhiều đơn) hoặc order id (legacy đơn lẻ). Resolve session trước;
+   * nếu không phải session thì fallback markPaymentSucceeded theo order id.
+   */
+  private async markMomoPaid(id: string, transId: string) {
+    const session = await this.db.checkoutSession.findUnique({ where: { id } });
+    if (session) {
+      await this.markSessionPaid(id, transId);
+    } else {
+      await this.markPaymentSucceeded(id, transId);
+    }
+  }
+
+  /**
+   * Một CheckoutSession đã thanh toán: mark TẤT CẢ Payment trong nhóm = PAID,
+   * TẤT CẢ Order = CONFIRMED, và CheckoutSession = PAID — atomic trong 1
+   * $transaction (all-or-none). Idempotent: early-return nếu session đã PAID.
+   */
+  private async markSessionPaid(sessionId: string, transId: string) {
+    await this.db.$transaction(async (tx) => {
+      const session = await tx.checkoutSession.findUnique({
+        where: { id: sessionId },
+        include: { orders: { select: { id: true } } },
+      });
+      if (!session) throw new NotFoundException('Phiên thanh toán không tồn tại');
+      if (session.status === CheckoutSessionStatus.PAID) return; // idempotent
+
+      const orderIds = session.orders.map((o) => o.id);
+      await tx.payment.updateMany({
+        where: { order_id: { in: orderIds } },
+        data: {
+          status: PaymentStatus.PAID,
+          transaction_ref: transId,
+          momo_trans_id: String(transId),
+        },
+      });
+      await tx.order.updateMany({
+        where: { id: { in: orderIds } },
+        data: { status: OrderStatus.CONFIRMED },
+      });
+      await tx.checkoutSession.update({
+        where: { id: sessionId },
+        data: { status: CheckoutSessionStatus.PAID, momo_trans_id: String(transId) },
       });
     });
   }
@@ -343,11 +415,39 @@ export class PaymentsService {
    * lên đơn của bạn. transId được sinh giả ngắn để dễ phân biệt với MoMo thật
    * (có prefix "DEV-") nếu sau này cần audit.
    */
-  async simulateMomoSuccess(buyerId: string, orderId: string) {
+  async simulateMomoSuccess(buyerId: string, id: string) {
     this.requireDevSimulator();
 
+    // id có thể là CheckoutSession id (flow mới) hoặc order id (legacy).
+    const session = await this.db.checkoutSession.findUnique({
+      where: { id },
+      include: { orders: { select: { payment_method: true } } },
+    });
+
+    const fakeTransId = `DEV-${Date.now()}`;
+
+    if (session) {
+      if (session.buyer_id !== buyerId) {
+        throw new ForbiddenException('Bạn không sở hữu phiên thanh toán này');
+      }
+      if (session.orders.some((o) => o.payment_method !== PaymentMethod.MOMO)) {
+        throw new BadRequestException('Phiên này có đơn không thanh toán bằng MoMo');
+      }
+      await this.markSessionPaid(id, fakeTransId);
+      this.logger.warn(
+        `[DEV-SIMULATOR] Marked session ${id} (${session.orders.length} orders) as PAID. transId=${fakeTransId}`,
+      );
+      return {
+        message: 'Đã giả lập thanh toán MoMo thành công.',
+        checkoutSessionId: id,
+        transId: fakeTransId,
+        paymentStatus: PaymentStatus.PAID,
+        orderStatus: OrderStatus.CONFIRMED,
+      };
+    }
+
     const order = await this.db.order.findUnique({
-      where: { id: orderId },
+      where: { id },
       include: { payments: true },
     });
     if (!order) throw new NotFoundException('Đơn hàng không tồn tại');
@@ -358,16 +458,13 @@ export class PaymentsService {
       throw new BadRequestException('Đơn này không thanh toán bằng MoMo');
     }
 
-    const fakeTransId = `DEV-${Date.now()}`;
-    await this.markPaymentSucceeded(orderId, fakeTransId);
-
+    await this.markPaymentSucceeded(id, fakeTransId);
     this.logger.warn(
-      `[DEV-SIMULATOR] Marked order ${orderId} as PAID without real MoMo callback. transId=${fakeTransId}`,
+      `[DEV-SIMULATOR] Marked order ${id} as PAID without real MoMo callback. transId=${fakeTransId}`,
     );
-
     return {
       message: 'Đã giả lập thanh toán MoMo thành công.',
-      orderId,
+      orderId: id,
       transId: fakeTransId,
       paymentStatus: PaymentStatus.PAID,
       orderStatus: OrderStatus.CONFIRMED,
@@ -406,13 +503,55 @@ export class PaymentsService {
   }
 
   /**
+   * Lightweight, PUBLIC payment-status lookup cho FE polling trên trang
+   * /payment/success sau khi MoMo redirect buyer về. Không gated JWT để trang
+   * success hoạt động kể cả khi token chưa kịp load; chỉ trả về `status` (không
+   * lộ amount/payer). Trả { status: null } nếu chưa có Payment row (race hiếm).
+   */
+  async getPaymentStatus(id: string): Promise<{ status: string | null }> {
+    // id có thể là CheckoutSession id (flow mới) — FE chỉ so sánh 'PAID'/'FAILED',
+    // PENDING coi như tiếp tục poll.
+    const session = await this.db.checkoutSession.findUnique({
+      where: { id },
+      select: { status: true },
+    });
+    if (session) return { status: session.status };
+
+    const payment = await this.db.payment.findFirst({
+      where: { order_id: id },
+      select: { status: true },
+      orderBy: { created_at: 'desc' },
+    });
+    return { status: payment?.status ?? null };
+  }
+
+  /**
    * Trạng thái Payment + Order — dùng cho FE polling trên trang checkout sau khi
    * buyer click "Mở MoMo". Khi Payment.status === PAID, FE đóng popup và redirect.
    * KHÔNG gated bằng dev simulator — đây là path bình thường để FE biết IPN đã về.
    */
-  async getMomoPaymentStatus(buyerId: string, orderId: string) {
+  async getMomoPaymentStatus(buyerId: string, id: string) {
+    // id có thể là CheckoutSession id (flow mới) hoặc order id (legacy).
+    const session = await this.db.checkoutSession.findUnique({
+      where: { id },
+      include: { orders: { select: { status: true } } },
+    });
+    if (session) {
+      if (session.buyer_id !== buyerId) {
+        throw new ForbiddenException('Bạn không sở hữu phiên thanh toán này');
+      }
+      return {
+        orderId: id,
+        // session.status: PENDING/PAID/FAILED — FE chỉ check PAID/FAILED.
+        paymentStatus: session.status,
+        orderStatus: session.orders[0]?.status ?? null,
+        transactionRef: session.momo_trans_id ?? null,
+        amount: Number(session.total_amount),
+      };
+    }
+
     const order = await this.db.order.findUnique({
-      where: { id: orderId },
+      where: { id },
       include: { payments: true },
     });
     if (!order) throw new NotFoundException('Đơn hàng không tồn tại');
@@ -421,7 +560,7 @@ export class PaymentsService {
     }
     const payment = order.payments?.[0];
     return {
-      orderId,
+      orderId: id,
       paymentStatus: payment?.status ?? null,
       orderStatus: order.status,
       transactionRef: payment?.transaction_ref ?? null,
@@ -430,18 +569,72 @@ export class PaymentsService {
   }
 
   /**
-   * Calls MoMo's /v2/gateway/api/refund.
+   * Low-level MoMo /refund HTTP call. Centralises signature, timeout (15s) và
+   * error handling cho cả refundMomoTransaction (legacy, per-order) lẫn
+   * refundPayment (session). Throws BadRequestException nếu MoMo từ chối hoặc
+   * network lỗi — caller KHÔNG được mark DB REFUNDED khi hàm này throw.
    *
    * Signed string (alphabetically sorted, NO signature field inside):
    *   accessKey=...&amount=...&description=...&orderId=...&partnerCode=...&requestId=...&transId=...
-   *
-   * Important:
+   * `orderId` phải UNIQUE mỗi lần (MoMo dedupe); `transId` là transId mua gốc.
+   */
+  private async momoRefundRequest(args: {
+    originalTransId: string;
+    refundOrderId: string;
+    requestId: string;
+    amount: number;
+    description: string;
+  }): Promise<any> {
+    const { partnerCode, accessKey, secretKey, endpoint } = this.getMomoConfig();
+    const refundEndpoint =
+      process.env.MOMO_REFUND_ENDPOINT || endpoint.replace('/create', '/refund');
+
+    const rawSignature =
+      `accessKey=${accessKey}&amount=${args.amount}&description=${args.description}` +
+      `&orderId=${args.refundOrderId}&partnerCode=${partnerCode}` +
+      `&requestId=${args.requestId}&transId=${args.originalTransId}`;
+    const signature = this.signMomoRequest(rawSignature, secretKey);
+
+    const payload = {
+      partnerCode,
+      orderId: args.refundOrderId,
+      requestId: args.requestId,
+      amount: args.amount,
+      transId: Number(args.originalTransId),
+      lang: 'vi',
+      description: args.description,
+      signature,
+    };
+
+    try {
+      const { data } = await axios.post(refundEndpoint, payload, {
+        headers: { 'Content-Type': 'application/json' },
+        timeout: 15000,
+      });
+      // MoMo: resultCode === 0 → refund accepted. Khác → để caller giữ REFUNDING, retry sau.
+      if (data?.resultCode !== 0) {
+        this.logger.error(`MoMo refund rejected (refundOrderId=${args.refundOrderId}): ${JSON.stringify(data)}`);
+        throw new BadRequestException(data?.message || 'MoMo từ chối yêu cầu hoàn tiền.');
+      }
+      return data;
+    } catch (err: any) {
+      if (err instanceof BadRequestException) throw err;
+      // Timeout / network / 5xx — log nguyên payload lỗi của MoMo nếu có.
+      this.logger.error(
+        `MoMo refund API error (refundOrderId=${args.refundOrderId}): ${JSON.stringify(err?.response?.data ?? err?.message ?? err)}`,
+      );
+      throw new BadRequestException(
+        err?.response?.data?.message || 'Gọi MoMo refund API thất bại (timeout/network).',
+      );
+    }
+  }
+
+  /**
+   * Calls MoMo's /v2/gateway/api/refund (LEGACY, per-order).
    *  - `orderId` sent to MoMo MUST be NEW per refund attempt (MoMo dedupes).
-   *    We use `<originalOrderId>-rfd-<timestamp>`.
-   *  - `transId` is the ORIGINAL purchase transId persisted into Payment.transaction_ref
-   *    by handleMomoIpn().
-   *  - DB writes wrap in a Prisma $transaction so Payment.status and Order.status
-   *    flip together (REFUNDED).
+   *  - `transId` is the ORIGINAL purchase transId in Payment.transaction_ref.
+   *  - DB writes wrap in a Prisma $transaction (Payment + Order flip to REFUNDED).
+   * Vẫn giữ cho đơn cũ không thuộc CheckoutSession; đơn mới đi qua refundPayment().
    */
   async refundMomoTransaction(orderId: string, amount: number, reason = 'Buyer not received') {
     const payment = await this.db.payment.findFirst({
@@ -492,43 +685,17 @@ export class PaymentsService {
       };
     }
 
-    // Giao dịch thật ⇒ gọi MoMo refund API
-    const { partnerCode, accessKey, secretKey, endpoint } = this.getMomoConfig();
-    const refundEndpoint =
-      process.env.MOMO_REFUND_ENDPOINT || endpoint.replace('/create', '/refund');
-
+    // Giao dịch thật ⇒ gọi MoMo refund API qua helper (sign + timeout + try/catch).
+    // requestId + refundOrderId unique mỗi lần để MoMo không dedupe.
     const refundOrderId = `${orderId}-rfd-${Date.now()}`;
-    const requestId = `${Date.now()}`;
-    const description = reason;
-
-    const rawSignature =
-      `accessKey=${accessKey}&amount=${refundAmount}&description=${description}` +
-      `&orderId=${refundOrderId}&partnerCode=${partnerCode}` +
-      `&requestId=${requestId}&transId=${payment.transaction_ref}`;
-    const signature = this.signMomoRequest(rawSignature, secretKey);
-
-    const payload = {
-      partnerCode,
-      orderId: refundOrderId,
+    const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const data = await this.momoRefundRequest({
+      originalTransId: payment.transaction_ref,
+      refundOrderId,
       requestId,
       amount: refundAmount,
-      transId: Number(payment.transaction_ref),
-      lang: 'vi',
-      description,
-      signature,
-    };
-
-    const { data } = await axios.post(refundEndpoint, payload, {
-      headers: { 'Content-Type': 'application/json' },
-      timeout: 15000,
+      description: reason,
     });
-
-    // MoMo: resultCode === 0 → refund accepted.
-    // Anything else: leave Payment at REFUNDING so admin can retry; do NOT mark REFUNDED.
-    if (data?.resultCode !== 0) {
-      this.logger.error(`MoMo refund fail (order ${orderId}): ${JSON.stringify(data)}`);
-      throw new BadRequestException(data?.message || 'MoMo từ chối yêu cầu hoàn tiền.');
-    }
 
     await this.db.$transaction(async (tx) => {
       await tx.payment.update({
@@ -549,6 +716,136 @@ export class PaymentsService {
       refundTransId: data.transId,
       refundOrderId,
       amount: refundAmount,
+    };
+  }
+
+  /**
+   * Hoàn tiền MoMo theo CheckoutSession (kiến trúc nhóm nhiều shop).
+   *
+   *  - Resolve session + verify momo_trans_id (transId mua gốc đã lưu khi PAID).
+   *  - opts.orderId  → hoàn TỪNG PHẦN (1 shop trong nhóm). MoMo hỗ trợ partial
+   *                    refund theo amount; ta gửi đúng số tiền của (các) đơn đó.
+   *    không có orderId → hoàn TOÀN BỘ session.
+   *  - Gọi MoMo refund qua momoRefundRequest (unique requestId + refundOrderId
+   *    dạng REFUND_<sessionId>_<ts>). Nếu MoMo fail → throw, KHÔNG mark DB.
+   *  - Thành công: trong 1 $transaction → Order(target)=REFUNDED, Payment gốc
+   *    (PAYMENT)=REFUNDED, tạo Payment log type=REFUND cho từng đơn, và cập nhật
+   *    CheckoutSession = REFUNDED (toàn bộ) | PARTIALLY_REFUNDED (một phần).
+   */
+  async refundPayment(
+    checkoutSessionId: string,
+    amount: number,
+    opts: { orderId?: string; reason?: string } = {},
+  ) {
+    const reason = opts.reason ?? 'Hoàn tiền đơn hàng';
+    const session = await this.db.checkoutSession.findUnique({
+      where: { id: checkoutSessionId },
+      include: { orders: true },
+    });
+    if (!session) throw new NotFoundException('Phiên thanh toán không tồn tại');
+    if (!session.momo_trans_id) {
+      throw new BadRequestException('Phiên chưa có momo_trans_id — không thể hoàn tiền MoMo.');
+    }
+
+    // Đơn cần hoàn: 1 đơn (partial) hoặc cả nhóm (full).
+    const targetOrders = opts.orderId
+      ? session.orders.filter((o) => o.id === opts.orderId)
+      : session.orders;
+    if (targetOrders.length === 0) {
+      throw new NotFoundException('Không tìm thấy đơn cần hoàn trong phiên này.');
+    }
+
+    // Idempotency: nếu tất cả đơn target đã REFUNDED → no-op an toàn.
+    if (targetOrders.every((o) => o.status === OrderStatus.REFUNDED)) {
+      return { message: 'Các đơn này đã được hoàn tiền trước đó.', alreadyRefunded: true };
+    }
+
+    const refundAmount = Math.floor(amount); // MoMo yêu cầu integer VND
+    if (refundAmount <= 0) throw new BadRequestException('Số tiền hoàn phải lớn hơn 0.');
+
+    const originalTransId = session.momo_trans_id;
+    const isDevTransaction = originalTransId.startsWith('DEV-');
+    const targetOrderIds = targetOrders.map((o) => o.id);
+    const isFullSession = targetOrders.length === session.orders.length;
+
+    // requestId + refundOrderId unique mỗi lần (MoMo dedupe theo orderId).
+    const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const refundOrderId = `REFUND_${checkoutSessionId}_${Date.now()}`;
+
+    let refundTransId: string;
+    if (isDevTransaction) {
+      refundTransId = `DEV-RFD-${Date.now()}`;
+      this.logger.warn(
+        `[DEV-SIMULATOR] Refund session=${checkoutSessionId} orders=${targetOrderIds.length} amount=${refundAmount} — transId giả lập, skip MoMo API.`,
+      );
+    } else {
+      this.logger.log(
+        `[MoMo REFUND] session=${checkoutSessionId} orders=${targetOrderIds.length} amount=${refundAmount} transId=${originalTransId}`,
+      );
+      const data = await this.momoRefundRequest({
+        originalTransId,
+        refundOrderId,
+        requestId,
+        amount: refundAmount,
+        description: reason,
+      });
+      refundTransId = String(data.transId ?? refundOrderId);
+    }
+
+    // MoMo đã chấp nhận (hoặc DEV) → ghi DB atomic.
+    await this.db.$transaction(async (tx) => {
+      // 1) Đơn target + payment gốc (PAYMENT) → REFUNDED
+      await tx.order.updateMany({
+        where: { id: { in: targetOrderIds } },
+        data: { status: OrderStatus.REFUNDED },
+      });
+      await tx.payment.updateMany({
+        where: { order_id: { in: targetOrderIds }, payment_type: PaymentType.PAYMENT },
+        data: { status: PaymentStatus.REFUNDED },
+      });
+
+      // 2) Log REFUND record cho từng đơn (đối soát theo số tiền thực của đơn)
+      for (const o of targetOrders) {
+        await tx.payment.create({
+          data: {
+            order_id: o.id,
+            payer_id: session.buyer_id,
+            amount: Number(o.final_total_price),
+            payment_method: PaymentMethod.MOMO,
+            status: PaymentStatus.REFUNDED,
+            payment_type: PaymentType.REFUND,
+            transaction_ref: refundTransId,
+            momo_trans_id: originalTransId,
+          },
+        });
+      }
+
+      // 3) Cập nhật trạng thái session: toàn bộ hoàn → REFUNDED, một phần → PARTIALLY_REFUNDED
+      const remaining = await tx.order.findMany({
+        where: { checkout_session_id: checkoutSessionId },
+        select: { status: true },
+      });
+      const allRefunded = remaining.every((o) => o.status === OrderStatus.REFUNDED);
+      await tx.checkoutSession.update({
+        where: { id: checkoutSessionId },
+        data: {
+          status: allRefunded
+            ? CheckoutSessionStatus.REFUNDED
+            : CheckoutSessionStatus.PARTIALLY_REFUNDED,
+        },
+      });
+    });
+
+    return {
+      message: isDevTransaction
+        ? 'Hoàn tiền MoMo thành công (DEV simulator).'
+        : 'Hoàn tiền MoMo thành công.',
+      checkoutSessionId,
+      refundTransId,
+      refundOrderId,
+      amount: refundAmount,
+      partial: !isFullSession,
+      simulated: isDevTransaction,
     };
   }
 }

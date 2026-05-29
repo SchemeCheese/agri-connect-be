@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Post, Query, Redirect, Request, UseGuards } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Get, Param, Post, Query, Redirect, Request, UseGuards } from '@nestjs/common';
 import { PaymentsService } from './payments.service';
 import { MomoCreateDto } from './dtos/momo-create.dto';
 import { AuthGuard } from '@nestjs/passport';
@@ -11,13 +11,24 @@ export class PaymentsController {
   @UseGuards(AuthGuard('jwt'))
   @Post('momo/create')
   async createMomo(@Request() req, @Body() dto: MomoCreateDto) {
-    return this.paymentsService.createMomoPayment(req.user.sub, dto.order_id);
+    const id = dto.checkout_session_id ?? dto.order_id;
+    if (!id) {
+      throw new BadRequestException('Thiếu checkout_session_id (hoặc order_id).');
+    }
+    return this.paymentsService.createMomoPayment(req.user.sub, id);
   }
 
   // MoMo gọi IPN (notify) — server-to-server POST
   @Post('momo/ipn')
   async momoIpn(@Body() body: any) {
     return this.paymentsService.handleMomoIpn(body);
+  }
+
+  // FE polling trên trang /payment/success — PUBLIC (không JWT), chỉ trả { status }.
+  // Không lộ thông tin nhạy cảm; dùng để biết IPN của MoMo đã về hay chưa.
+  @Get('status/:orderId')
+  async paymentStatus(@Param('orderId') orderId: string) {
+    return this.paymentsService.getPaymentStatus(orderId);
   }
 
   // MoMo redirect browser của buyer về đây sau khi thanh toán (GET).
