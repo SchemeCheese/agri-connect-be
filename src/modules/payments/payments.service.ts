@@ -1,4 +1,4 @@
-import { Injectable, BadRequestException, ForbiddenException, NotFoundException, Logger } from '@nestjs/common';
+import { Injectable, BadRequestException, ForbiddenException, NotFoundException, ServiceUnavailableException, Logger } from '@nestjs/common';
 import { DatabaseService } from '../../database/database.service';
 import { PaymentStatus, PaymentMethod, PaymentType, OrderStatus, CheckoutSessionStatus, Prisma } from '@prisma/client';
 import axios from 'axios';
@@ -28,6 +28,7 @@ interface MomoIpnPayload {
 @Injectable()
 export class PaymentsService {
   private readonly logger = new Logger(PaymentsService.name);
+  private readonly momoRequestTimeoutMs = Number(process.env.MOMO_HTTP_TIMEOUT_MS ?? 15000);
 
   constructor(private readonly db: DatabaseService) {}
 
@@ -198,10 +199,37 @@ export class PaymentsService {
     };
 
     this.logger.log(
-      `[MoMo CREATE] session=${momoOrderId} orders=${session.orders.length} amount=${amount} ipnUrl="${ipnUrl}"`,
+      `[MoMo CREATE] session=${momoOrderId} orders=${session.orders.length} amount=${amount} ipnUrl="${ipnUrl}" timeoutMs=${this.momoRequestTimeoutMs}`,
     );
-    const response = await axios.post(endpoint, payload, { headers: { 'Content-Type': 'application/json' } });
-    const data = response.data as any;
+
+    let data: any;
+    try {
+      const response = await axios.post(endpoint, payload, {
+        headers: { 'Content-Type': 'application/json' },
+        timeout: this.momoRequestTimeoutMs,
+        timeoutErrorMessage: 'MoMo request timed out',
+      });
+      data = response.data;
+    } catch (error: any) {
+      const status = error?.response?.status;
+      const responseData = error?.response?.data;
+      const message = responseData?.message || error?.message || 'Không kết nối được tới MoMo';
+
+      this.logger.error(
+        `[MoMo CREATE] request failed session=${momoOrderId} status=${status ?? 'n/a'} message=${message}`,
+        error?.stack,
+      );
+
+      if (error?.code === 'ECONNABORTED' || String(message).toLowerCase().includes('timed out')) {
+        throw new ServiceUnavailableException('MoMo tạm thời không phản hồi, vui lòng thử lại sau.');
+      }
+
+      if (status && status >= 400 && status < 500) {
+        throw new BadRequestException(message);
+      }
+
+      throw new ServiceUnavailableException('Không tạo được giao dịch MoMo, vui lòng thử lại sau.');
+    }
 
     if (data?.resultCode !== 0) {
       this.logger.error(`MoMo create fail: ${JSON.stringify(data)}`);

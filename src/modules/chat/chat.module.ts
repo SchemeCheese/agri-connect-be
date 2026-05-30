@@ -14,6 +14,7 @@ import { DatabaseModule } from '../../database/database.module';
     }),
   ],
   providers: [ChatGateway, ChatService, NegotiationService],
+  exports: [ChatGateway],
   controllers: [ChatController],
 })
 export class ChatModule {}

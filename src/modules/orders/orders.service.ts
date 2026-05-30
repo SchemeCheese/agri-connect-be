@@ -11,8 +11,10 @@ import { Cron, CronExpression } from '@nestjs/schedule';
 import { DatabaseService } from '../../database/database.service';
 import { EmailService } from '../../communication/email/email.service';
 import { PaymentsService } from '../payments/payments.service';
+import { ChatGateway } from '../chat/chat.gateway';
 import { CreateOrderDto } from './dtos/create-order.dto';
-import { OrderStatus, PaymentStatus, PaymentMethod } from '@prisma/client';
+import { CheckoutQuoteDto } from './dtos/checkout-quote.dto';
+import { OrderStatus, PaymentStatus, PaymentMethod, QuoteStatus, MessageType } from '@prisma/client';
 
 // Số ngày sau khi giao hàng buyer mới được phép báo sự cố (SHIPPING overdue window)
 const REPORT_ISSUE_DELAY_DAYS = 3;
@@ -59,7 +61,180 @@ export class OrdersService {
         private readonly databaseService: DatabaseService,
         private readonly emailService: EmailService,
         private readonly paymentsService: PaymentsService,
+        private readonly chatGateway: ChatGateway,
     ) { }
+
+    async checkoutQuote(buyerId: string, dto: CheckoutQuoteDto) {
+        const quote = await this.databaseService.chatMessage.findUnique({
+            where: { id: dto.quoteId },
+            include: {
+                conversation: true,
+                sender: { select: { id: true, full_name: true } },
+                context_product: {
+                    select: { id: true, name: true, unit: true, reference_price: true },
+                },
+            },
+        });
+
+        if (!quote) throw new NotFoundException('Báo giá không tồn tại.');
+        if (quote.message_type !== MessageType.NEGOTIATION_QUOTE) {
+            throw new BadRequestException('Tin nhắn này không phải báo giá.');
+        }
+        if (quote.quote_status !== QuoteStatus.PENDING) {
+            throw new BadRequestException('Báo giá này đã được xử lý rồi.');
+        }
+
+        const conversation = quote.conversation;
+        if (conversation.user1_id !== buyerId && conversation.user2_id !== buyerId) {
+            throw new ForbiddenException('Bạn không thuộc cuộc trò chuyện này.');
+        }
+        if (quote.sender_id === buyerId) {
+            throw new BadRequestException('Người mua không thể tự chấp nhận báo giá của mình.');
+        }
+
+        const buyer = await this.databaseService.user.findUnique({
+            where: { id: buyerId },
+            select: {
+                full_name: true,
+                phone_number: true,
+                profile: { select: { address: true } },
+            },
+        });
+
+        const shippingAddressBase = buyer?.profile?.address?.trim();
+        const phoneNumberBase = buyer?.phone_number?.trim();
+        const shippingAddress = shippingAddressBase || dto.shippingAddress?.trim();
+        const phoneNumber = phoneNumberBase || dto.phoneNumber?.trim();
+
+        if (!shippingAddress) {
+            throw new BadRequestException('MISSING_SHIPPING_ADDRESS');
+        }
+        if (!phoneNumber) {
+            throw new BadRequestException('MISSING_SHIPPING_ADDRESS');
+        }
+
+        const quantity = Number(quote.quote_quantity ?? 0);
+        const negotiatedPrice = Number(quote.quote_price ?? 0);
+        if (quantity <= 0 || negotiatedPrice <= 0) {
+            throw new BadRequestException('Báo giá không hợp lệ.');
+        }
+
+        const productId = quote.quote_product_id;
+        if (!productId) {
+            throw new BadRequestException('Báo giá không có sản phẩm.');
+        }
+
+        const product = await this.databaseService.product.findUnique({
+            where: { id: productId },
+            select: { id: true, is_active: true, seller_id: true, name: true, unit: true },
+        });
+        if (!product || !product.is_active) {
+            throw new NotFoundException('Sản phẩm trong báo giá không còn khả dụng.');
+        }
+
+        const totalAmount = Math.round(quantity * negotiatedPrice);
+
+        const created = await this.databaseService.$transaction(async (prisma) => {
+            const quoteUpdated = await prisma.chatMessage.updateMany({
+                where: {
+                    id: quote.id,
+                    message_type: MessageType.NEGOTIATION_QUOTE,
+                    quote_status: QuoteStatus.PENDING,
+                },
+                data: { quote_status: QuoteStatus.ACCEPTED },
+            });
+
+            if (quoteUpdated.count === 0) {
+                throw new BadRequestException('Báo giá này đã được xử lý rồi.');
+            }
+
+                        if ((!shippingAddressBase && dto.shippingAddress) || (!phoneNumberBase && dto.phoneNumber)) {
+                            await prisma.user.update({
+                                where: { id: buyerId },
+                                data: {
+                                    ...(dto.phoneNumber && !phoneNumberBase ? { phone_number: dto.phoneNumber.trim() } : {}),
+                                    ...(dto.shippingAddress && !shippingAddressBase
+                                        ? {
+                                                profile: {
+                                                    upsert: {
+                                                        create: { address: dto.shippingAddress.trim() },
+                                                        update: { address: dto.shippingAddress.trim() },
+                                                    },
+                                                },
+                                            }
+                                        : {}),
+                                },
+                            });
+                        }
+
+            const session = await prisma.checkoutSession.create({
+                data: {
+                    buyer_id: buyerId,
+                    total_amount: totalAmount,
+                },
+            });
+
+            const order = await prisma.order.create({
+                data: {
+                    buyer_id: buyerId,
+                    seller_id: quote.sender_id,
+                    checkout_session_id: session.id,
+                    negotiation_quote_id: quote.id,
+                    shipping_address: shippingAddress,
+                    payment_method: dto.paymentMethod,
+                        note: dto.note?.trim() || undefined,
+                    final_total_price: totalAmount,
+                    status: OrderStatus.PENDING,
+                    order_items: {
+                        create: [{
+                            product_id: product.id,
+                            quantity,
+                            negotiated_price: negotiatedPrice,
+                        }],
+                    },
+                },
+            });
+
+            await this.paymentsService.createInitialPayment(prisma, {
+                orderId: order.id,
+                payerId: buyerId,
+                amount: totalAmount,
+                method: dto.paymentMethod,
+            });
+
+            return { sessionId: session.id, orderId: order.id };
+        }, {
+            timeout: 15_000,
+            maxWait: 5_000,
+        });
+
+        this.chatGateway.server.to(conversation.id).emit('quoteUpdated', {
+            messageId: quote.id,
+            status: QuoteStatus.ACCEPTED,
+        });
+
+        if (dto.paymentMethod === PaymentMethod.MOMO) {
+            const momo = await this.paymentsService.createMomoPayment(buyerId, created.sessionId);
+            return {
+                quoteId: quote.id,
+                orderId: created.orderId,
+                checkoutSessionId: created.sessionId,
+                totalAmount,
+                paymentMethod: dto.paymentMethod,
+                payUrl: momo.payUrl,
+                deeplink: momo.deeplink,
+                qrCodeUrl: momo.qrCodeUrl,
+            };
+        }
+
+        return {
+            quoteId: quote.id,
+            orderId: created.orderId,
+            checkoutSessionId: created.sessionId,
+            totalAmount,
+            paymentMethod: dto.paymentMethod,
+        };
+    }
 
     async checkout(buyerId: string, dto: CreateOrderDto) {
         if (!dto.seller_orders || dto.seller_orders.length === 0) {

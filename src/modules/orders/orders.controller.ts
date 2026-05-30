@@ -4,6 +4,7 @@ import { OrdersService } from './orders.service';
 import { PaymentsService } from '../payments/payments.service';
 import { DatabaseService } from '../../database/database.service';
 import { CreateOrderDto } from './dtos/create-order.dto';
+import { CheckoutQuoteDto } from './dtos/checkout-quote.dto';
 import { CancelOrderDto } from './dtos/cancel-order.dto';
 import { ReportIssueDto } from './dtos/report-issue.dto';
 import { JwtAuthGuard } from '../auth/decorators/guards/jwt-auth.guard';
@@ -26,6 +27,14 @@ export class OrdersController {
     @Post('checkout')
     async checkout(@Request() req, @Body() dto: CreateOrderDto) {
         return this.ordersService.checkout(req.user.sub, dto);
+    }
+
+    // ─── BUYER: Thanh toán quote ngay trong chat ───────────────────────────
+    @UseGuards(RolesGuard)
+    @Roles(UserRole.BUYER)
+    @Post('checkout-quote')
+    async checkoutQuote(@Request() req, @Body() dto: CheckoutQuoteDto) {
+        return this.ordersService.checkoutQuote(req.user.sub, dto);
     }
 
     // ─── BUYER: Xem đơn của mình ──────────────────────────────────────────────
