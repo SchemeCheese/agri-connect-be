@@ -3,6 +3,7 @@
   BadRequestException,
   ForbiddenException,
   NotFoundException,
+  Logger,
 } from '@nestjs/common';
 import { MessageType, QuoteStatus } from '@prisma/client';
 import { DatabaseService } from '../../database/database.service';
@@ -44,10 +45,66 @@ export interface SendQuoteDto {
 
 @Injectable()
 export class NegotiationService {
+  private readonly logger = new Logger(NegotiationService.name);
+
   constructor(
     private readonly db: DatabaseService,
     private readonly chatService: ChatService,
   ) {}
+
+  private isNegotiationRequest(message: {
+    message_type: MessageType;
+    proposed_quantity: unknown;
+    proposed_price: unknown;
+  }) {
+    return message.message_type === MessageType.SYSTEM
+      && message.proposed_quantity != null
+      && message.proposed_price != null;
+  }
+
+  private isNegotiationCancelled(message: {
+    message_type: MessageType;
+    message_content: string;
+  }) {
+    return message.message_type === MessageType.SYSTEM
+      && /đã hủy cuộc đàm phán/i.test(message.message_content);
+  }
+
+  private async getLatestNegotiationEvent(conversationId: string) {
+    const messages = await this.db.chatMessage.findMany({
+      where: {
+        conversation_id: conversationId,
+        message_type: { in: [MessageType.SYSTEM, MessageType.NEGOTIATION_QUOTE] },
+      },
+      orderBy: [
+        { created_at: 'desc' },
+        { id: 'desc' },
+      ],
+      take: 50,
+      select: {
+        id: true,
+        message_type: true,
+        message_content: true,
+        proposed_quantity: true,
+        proposed_price: true,
+        created_at: true,
+      },
+    });
+
+    for (const message of messages) {
+      if (message.message_type === MessageType.NEGOTIATION_QUOTE) {
+        return { kind: 'QUOTE' as const, message };
+      }
+      if (this.isNegotiationCancelled(message)) {
+        return { kind: 'CANCELLED' as const, message };
+      }
+      if (this.isNegotiationRequest(message)) {
+        return { kind: 'REQUEST' as const, message };
+      }
+    }
+
+    return { kind: 'NONE' as const, message: null };
+  }
 
   // ─── Buyer khởi động đàm phán ─────────────────────────────────────────────
   // Validate ngưỡng kg, tìm/tạo conversation, lưu giá đề xuất, gửi tin nhắn SYSTEM
@@ -57,6 +114,10 @@ export class NegotiationService {
     quantity: number,
     proposedPrice: number,
   ): Promise<StartNegotiationResult> {
+    this.logger.debug(
+      `[startNegotiation] startNegotiation called buyerId=${buyerId} productId=${productId} quantity=${quantity} proposedPrice=${proposedPrice}`,
+    );
+
     const product = await this.db.product.findUnique({
       where: { id: productId },
       include: { seller: { select: { id: true, full_name: true } } },
@@ -68,12 +129,10 @@ export class NegotiationService {
     if (product.seller_id === buyerId) {
       throw new BadRequestException('Bạn không thể đàm phán với chính sản phẩm của mình.');
     }
-    if (!product.min_negotiation_qty) {
-      throw new BadRequestException('Sản phẩm này không hỗ trợ thương lượng giá.');
-    }
-    if (quantity < Number(product.min_negotiation_qty)) {
+    const minNegotiationQty = Number(product.min_negotiation_qty ?? 1);
+    if (quantity < minNegotiationQty) {
       throw new BadRequestException(
-        `Phải mua từ ${product.min_negotiation_qty} ${product.unit} trở lên mới được thương lượng.`,
+        `Phải mua từ ${minNegotiationQty} ${product.unit} trở lên mới được thương lượng.`,
       );
     }
 
@@ -109,6 +168,10 @@ export class NegotiationService {
       select: { id: true, message_content: true, message_type: true, context_product_id: true, proposed_quantity: true, proposed_price: true, created_at: true },
     });
 
+    this.logger.debug(
+      `[startNegotiation] ChatMessage created id=${savedMsg.id} type=${savedMsg.message_type} conversationId=${conversation.id}`,
+    );
+
     // Lấy ảnh đầu tiên của sản phẩm để FE badge
     const img = await this.db.attachment.findFirst({
       where: { target_id: productId, target_type: 'PRODUCT' },
@@ -124,7 +187,7 @@ export class NegotiationService {
         name: product.name,
         unit: product.unit,
         reference_price: Number(product.reference_price),
-        min_negotiation_qty: Number(product.min_negotiation_qty),
+        min_negotiation_qty: minNegotiationQty,
         image: img?.url ?? null,
       },
       systemMessage: {
@@ -150,17 +213,23 @@ export class NegotiationService {
       throw new ForbiddenException('Bạn không thuộc cuộc trò chuyện này.');
     }
 
-    // Kiểm tra có PENDING quote chưa xử lý không
+    const latestNegotiationEvent = await this.getLatestNegotiationEvent(dto.conversationId);
+    if (latestNegotiationEvent.kind !== 'REQUEST') {
+      throw new BadRequestException('Yêu cầu thương lượng này đã được xử lý rồi.');
+    }
+
     const pendingQuote = await this.db.chatMessage.findFirst({
       where: {
         conversation_id: dto.conversationId,
         message_type: MessageType.NEGOTIATION_QUOTE,
-        quote_status: QuoteStatus.PENDING,
+        created_at: {
+          gte: latestNegotiationEvent.message.created_at,
+        },
       },
     });
     if (pendingQuote) {
       throw new BadRequestException(
-        'Đang có một báo giá chưa được phản hồi. Vui lòng chờ người mua quyết định.',
+        'Yêu cầu thương lượng này đã được gửi báo giá rồi.',
       );
     }
 
@@ -253,6 +322,11 @@ export class NegotiationService {
     if (!conv) throw new NotFoundException('Cuộc trò chuyện không tồn tại.');
     if (conv.user1_id !== userId && conv.user2_id !== userId) {
       throw new ForbiddenException('Bạn không thuộc cuộc trò chuyện này.');
+    }
+
+    const latestNegotiationEvent = await this.getLatestNegotiationEvent(conversationId);
+    if (latestNegotiationEvent.kind !== 'REQUEST') {
+      throw new BadRequestException('Yêu cầu thương lượng này đã được xử lý rồi.');
     }
 
     // Hủy toàn bộ PENDING quote trong conversation

@@ -217,6 +217,11 @@ model Order {
   // ngược với đơn cũ; checkout mới luôn gán (single-shop = session 1 đơn).
   checkout_session_id String?
   checkout_session    CheckoutSession? @relation(fields: [checkout_session_id], references: [id])
+  // Loose reference tới ChatMessage(NEGOTIATION_QUOTE).id mà đơn này được tạo từ
+  // (pay-from-chat). Nullable: đơn thường = NULL. KHÔNG unique — cho phép tạo đơn
+  // mới khi đơn cũ của cùng quote bị CANCELLED/FAILED (retry thanh toán) hoặc
+  // split-shipment B2B sau này. Quy tắc "tối đa 1 đơn ACTIVE / quote" enforce ở service layer.
+  negotiation_quote_id String?
   created_at        DateTime      @default(now())
   updated_at        DateTime      @updatedAt
   order_items       OrderItem[]
@@ -224,6 +229,7 @@ model Order {
   reviews           Review[]
 
   @@index([checkout_session_id])
+  @@index([negotiation_quote_id])
 }
 
 // Nhóm thanh toán cho giỏ nhiều shop: 1 CheckoutSession ↔ N Order, nhưng chỉ

@@ -272,11 +272,23 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     const userId = client.data?.userId;
     if (!userId) throw new WsException('Chưa xác thực.');
 
+    this.logger.debug(`🤝 [startNegotiation] handleStartNegotiation entered`);
+    this.logger.debug(`🤝 [startNegotiation] raw payload=${JSON.stringify(data)}`);
+    this.logger.debug(`🤝 [startNegotiation] validation passed`);
+    this.logger.debug(
+      `🤝 [startNegotiation] current userId=${userId} productId=${data.productId} quantity=${data.quantity} proposedPrice=${data.proposedPrice}`,
+    );
+
+    this.logger.debug(`🤝 [startNegotiation] negotiationService.startNegotiation called`);
     const result = await this.negotiationService.startNegotiation(
       userId,
       data.productId,
       data.quantity,
       data.proposedPrice,
+    );
+
+    this.logger.debug(
+      `🤝 [startNegotiation] ChatMessage created id=${result.systemMessage.id} type=${result.systemMessage.message_type} conversationId=${result.conversationId}`,
     );
 
     // Buyer tự join vào phòng
