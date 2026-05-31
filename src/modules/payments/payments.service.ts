@@ -277,9 +277,22 @@ export class PaymentsService {
       throw new BadRequestException('Invalid signature');
     }
 
-    // ipn.orderId IS the CheckoutSession id (or legacy order id). markMomoPaid
-    // resolves which and is idempotent — duplicate IPN is a safe no-op.
+    // ipn.orderId IS the CheckoutSession id (or legacy order id).
+    // Early idempotency check: if already PAID, return immediately (prevent duplicate processing).
     if (ipn.resultCode === 0) {
+      const session = await this.db.checkoutSession.findUnique({
+        where: { id: ipn.orderId },
+        select: { status: true },
+      });
+
+      // CheckoutSession found and already PAID → idempotent return
+      if (session && session.status === CheckoutSessionStatus.PAID) {
+        this.logger.log(
+          `[MoMo IPN] IDEMPOTENT: CheckoutSession ${ipn.orderId} already PAID. Skipping duplicate processing.`,
+        );
+        return { resultCode: 0, message: 'OK' };
+      }
+
       await this.markMomoPaid(ipn.orderId, String(ipn.transId));
     }
 
@@ -393,18 +406,31 @@ export class PaymentsService {
    * Một CheckoutSession đã thanh toán: mark TẤT CẢ Payment trong nhóm = PAID,
    * TẤT CẢ Order = CONFIRMED, và CheckoutSession = PAID — atomic trong 1
    * $transaction (all-or-none). Idempotent: early-return nếu session đã PAID.
+   *
+   * Multi-shop constraint: Khi buyer checkout nhiều shop, tất cả order và payment
+   * trong session sẽ được cập nhật cùng lúc (atomic). Không ai có thể partial-confirm.
    */
   private async markSessionPaid(sessionId: string, transId: string) {
     await this.db.$transaction(async (tx) => {
+      // Fetch session + all its orders to get the full scope of updates
       const session = await tx.checkoutSession.findUnique({
         where: { id: sessionId },
         include: { orders: { select: { id: true } } },
       });
       if (!session) throw new NotFoundException('Phiên thanh toán không tồn tại');
-      if (session.status === CheckoutSessionStatus.PAID) return; // idempotent
+
+      // Idempotency: nếu session đã PAID, return ngay (tránh duplicate webhook processing)
+      if (session.status === CheckoutSessionStatus.PAID) {
+        this.logger.log(`[markSessionPaid] IDEMPOTENT: session=${sessionId} already PAID, skipping.`);
+        return;
+      }
 
       const orderIds = session.orders.map((o) => o.id);
-      await tx.payment.updateMany({
+      const orderCount = orderIds.length;
+
+      // 1. Update ALL Payments in this session → PAID with MoMo transaction_id
+      //    (matches "updateMany Payments where order.checkout_session_id matches")
+      const paymentResult = await tx.payment.updateMany({
         where: { order_id: { in: orderIds } },
         data: {
           status: PaymentStatus.PAID,
@@ -412,14 +438,23 @@ export class PaymentsService {
           momo_trans_id: String(transId),
         },
       });
-      await tx.order.updateMany({
+      this.logger.log(`[markSessionPaid] Updated ${paymentResult.count} payments to PAID`);
+
+      // 2. Update ALL Orders in this session → CONFIRMED
+      const orderResult = await tx.order.updateMany({
         where: { id: { in: orderIds } },
         data: { status: OrderStatus.CONFIRMED },
       });
+      this.logger.log(`[markSessionPaid] Updated ${orderResult.count} orders to CONFIRMED`);
+
+      // 3. Update CheckoutSession → PAID (marks entire multi-shop transaction complete)
       await tx.checkoutSession.update({
         where: { id: sessionId },
         data: { status: CheckoutSessionStatus.PAID, momo_trans_id: String(transId) },
       });
+      this.logger.log(
+        `[markSessionPaid] ✅ SUCCESS: sessionId=${sessionId} orders=${orderCount} amount=${session.total_amount} transId=${transId}`,
+      );
     });
   }
 
