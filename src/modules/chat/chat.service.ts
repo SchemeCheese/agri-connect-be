@@ -383,19 +383,25 @@ export class ChatService {
             negotiation_quote_id: true,
             status: true,
             payment_method: true,
-            payments: { select: { status: true }, take: 1 },
+            final_total_price: true,
+            checkout_session_id: true,
+            payments: { select: { status: true }, take: 1, orderBy: { created_at: 'desc' } },
           },
         })
       : [];
 
-    const orderMap = new Map<string, { id: string; status: string; payment_method: string; payment_status?: string }>();
+    // Map orders by their negotiation_quote_id for O(1) lookup
+    const orderMap = new Map<string, any>();
     for (const order of ordersRaw) {
-      orderMap.set(order.negotiation_quote_id || '', {
-        id: order.id,
-        status: order.status,
-        payment_method: order.payment_method,
-        payment_status: order.payments?.[0]?.status,
-      });
+      if (order.negotiation_quote_id) {
+        orderMap.set(order.negotiation_quote_id, {
+          orderId: order.id,
+          checkoutSessionId: order.checkout_session_id ?? undefined,
+          totalAmount: order.final_total_price ? Number(order.final_total_price) : 0,
+          paymentStatus: order.payments?.[0]?.status as any,
+          orderStatus: order.status,
+        });
+      }
     }
 
     const items = page.map((m) => ({
@@ -432,8 +438,8 @@ export class ChatService {
             status: m.quote_status,
           }
         : null,
-      // Order info — populated for NEGOTIATION_QUOTE messages that created an order
-      orderInfo: m.message_type === MessageType.NEGOTIATION_QUOTE ? orderMap.get(m.id) ?? null : null,
+      // Order info — hydrated for NEGOTIATION_QUOTE messages that have associated orders
+      orderInfo: m.message_type === MessageType.NEGOTIATION_QUOTE ? (orderMap.get(m.id) ?? null) : null,
     }));
 
     return { items, nextCursor, hasMore };
