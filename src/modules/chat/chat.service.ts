@@ -370,6 +370,34 @@ export class ChatService {
       if (!imageMap.has(att.target_id)) imageMap.set(att.target_id, att.url);
     }
 
+    // Batch load orders for NEGOTIATION_QUOTE messages to avoid N+1 queries
+    const quoteMessageIds = page
+      .filter((m) => m.message_type === MessageType.NEGOTIATION_QUOTE)
+      .map((m) => m.id);
+
+    const ordersRaw = quoteMessageIds.length
+      ? await this.db.order.findMany({
+          where: { negotiation_quote_id: { in: quoteMessageIds } },
+          select: {
+            id: true,
+            negotiation_quote_id: true,
+            status: true,
+            payment_method: true,
+            payments: { select: { status: true }, take: 1 },
+          },
+        })
+      : [];
+
+    const orderMap = new Map<string, { id: string; status: string; payment_method: string; payment_status?: string }>();
+    for (const order of ordersRaw) {
+      orderMap.set(order.negotiation_quote_id || '', {
+        id: order.id,
+        status: order.status,
+        payment_method: order.payment_method,
+        payment_status: order.payments?.[0]?.status,
+      });
+    }
+
     const items = page.map((m) => ({
       id: m.id,
       sender: m.sender,
@@ -404,6 +432,8 @@ export class ChatService {
             status: m.quote_status,
           }
         : null,
+      // Order info — populated for NEGOTIATION_QUOTE messages that created an order
+      orderInfo: m.message_type === MessageType.NEGOTIATION_QUOTE ? orderMap.get(m.id) ?? null : null,
     }));
 
     return { items, nextCursor, hasMore };

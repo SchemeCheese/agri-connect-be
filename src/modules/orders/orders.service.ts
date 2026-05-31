@@ -843,6 +843,8 @@ export class OrdersService {
             },
         });
 
+        await this.emitOrderStatusUpdate(orderId, buyerId, OrderStatus.ISSUE_REPORTED);
+
         try {
             // Gửi email xác nhận cho BUYER
             if (order.buyer?.email) {
@@ -1048,6 +1050,8 @@ export class OrdersService {
                 await this.paymentsService.markFailed(tx, orderId);
             });
 
+            await this.emitOrderStatusUpdate(orderId, sellerId, OrderStatus.FAILED);
+
             try {
                 if (order.buyer?.email) {
                     await this.emailService.sendOrderFailedCodEmail(
@@ -1105,6 +1109,8 @@ export class OrdersService {
                     await this.paymentsService.markRefunded(tx, orderId);
                 });
 
+                await this.emitOrderStatusUpdate(orderId, sellerId, OrderStatus.FAILED);
+
                 this.logger.log(`[confirmLost] ✅ Refund succeeded, order marked FAILED: ${orderId}`);
             } catch (error) {
                 // Refund API failed: leave order as ISSUE_REPORTED for manual retry
@@ -1132,6 +1138,8 @@ export class OrdersService {
                 await this.paymentsService.markFailed(tx, orderId);
             }
         });
+
+        await this.emitOrderStatusUpdate(orderId, sellerId, OrderStatus.FAILED);
 
         try {
             if (order.buyer?.email) {
@@ -1173,6 +1181,8 @@ export class OrdersService {
             data: { status: OrderStatus.CANCELLED },
         });
 
+        await this.emitOrderStatusUpdate(orderId, sellerId, OrderStatus.CANCELLED);
+
         // Gửi email thông báo hủy cho người mua
         try {
             if (order.buyer?.email) {
@@ -1204,10 +1214,14 @@ export class OrdersService {
                 `Chỉ có thể hủy đơn khi đang ở trạng thái PENDING. Trạng thái hiện tại: ${order.status}`,
             );
 
-        return this.databaseService.order.update({
+        const updated = await this.databaseService.order.update({
             where: { id: orderId },
             data: { status: OrderStatus.CANCELLED },
         });
+
+        await this.emitOrderStatusUpdate(orderId, buyerId, OrderStatus.CANCELLED);
+
+        return updated;
     }
 
     // =====================================================
