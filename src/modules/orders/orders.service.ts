@@ -215,6 +215,9 @@ export class OrdersService {
 
         if (dto.paymentMethod === PaymentMethod.MOMO) {
             const momo = await this.paymentsService.createMomoPayment(buyerId, created.sessionId);
+                    if (!momo?.payUrl) {
+                        throw new InternalServerErrorException('MoMo chưa trả về payUrl.');
+                    }
             return {
                 quoteId: quote.id,
                 orderId: created.orderId,
@@ -495,12 +498,10 @@ export class OrdersService {
             },
         });
 
-        // Lấy tất cả product_id từ các đơn hàng
         const productIds = orders.flatMap((o) =>
             o.order_items.map((item) => item.product_id),
         );
 
-        // Fetch ảnh sản phẩm từ bảng Attachment (polymorphic)
         const attachments = await this.databaseService.attachment.findMany({
             where: {
                 target_type: 'PRODUCT',
@@ -508,7 +509,6 @@ export class OrdersService {
             },
         });
 
-        // Map: product_id -> danh sách url ảnh
         const imageMap = attachments.reduce(
             (acc, att) => {
                 if (!acc[att.target_id]) acc[att.target_id] = [];
@@ -518,7 +518,6 @@ export class OrdersService {
             {} as Record<string, string[]>,
         );
 
-        // Gắn images vào từng product trong order_items
         return orders.map((order) => ({
             ...order,
             order_items: order.order_items.map((item) => ({
@@ -529,6 +528,112 @@ export class OrdersService {
                 },
             })),
         }));
+    }
+
+    async getOrderById(userId: string, orderId: string) {
+        const order = await this.databaseService.order.findFirst({
+            where: {
+                id: orderId,
+                buyer_id: userId,
+            },
+            include: {
+                buyer: {
+                    select: {
+                        id: true,
+                        full_name: true,
+                        email: true,
+                        phone_number: true,
+                        profile: {
+                            select: {
+                                address: true,
+                                store_name: true,
+                            },
+                        },
+                    },
+                },
+                seller: {
+                    select: {
+                        id: true,
+                        full_name: true,
+                        email: true,
+                        phone_number: true,
+                        profile: {
+                            select: {
+                                store_name: true,
+                                address: true,
+                            },
+                        },
+                    },
+                },
+                voucher: {
+                    select: {
+                        id: true,
+                        code: true,
+                        discount_type: true,
+                        discount_value: true,
+                        max_discount_amount: true,
+                        min_order_value: true,
+                    },
+                },
+                payments: {
+                    select: {
+                        id: true,
+                        amount: true,
+                        payment_method: true,
+                        status: true,
+                        transaction_ref: true,
+                        created_at: true,
+                        updated_at: true,
+                    },
+                    orderBy: { created_at: 'desc' },
+                },
+                order_items: {
+                    include: {
+                        product: true,
+                    },
+                },
+                checkout_session: {
+                    select: {
+                        id: true,
+                        total_amount: true,
+                        status: true,
+                        momo_trans_id: true,
+                        created_at: true,
+                        updated_at: true,
+                    },
+                },
+            },
+        });
+
+        if (!order) {
+            throw new NotFoundException(`Đơn hàng #${orderId} không tồn tại.`);
+        }
+
+        const productIds = order.order_items.map((item) => item.product_id);
+        const attachments = await this.databaseService.attachment.findMany({
+            where: {
+                target_type: 'PRODUCT',
+                target_id: { in: productIds },
+            },
+        });
+
+        const imageMap = attachments.reduce((acc, att) => {
+            if (!acc[att.target_id]) acc[att.target_id] = [];
+            acc[att.target_id].push(att.url);
+            return acc;
+        }, {} as Record<string, string[]>);
+
+        return {
+            ...order,
+            shipping_address: order.shipping_address,
+            items: order.order_items.map((item) => ({
+                ...item,
+                product: {
+                    ...item.product,
+                    images: imageMap[item.product_id] ?? [],
+                },
+            })),
+        };
     }
 
     // =====================================================
@@ -600,10 +705,14 @@ export class OrdersService {
                 `Chỉ đơn ở trạng thái PENDING mới có thể xác nhận. Trạng thái hiện tại: ${order.status}`,
             );
 
-        return this.databaseService.order.update({
+        const updated = await this.databaseService.order.update({
             where: { id: orderId },
             data: { status: OrderStatus.CONFIRMED },
         });
+
+        await this.emitOrderStatusUpdate(orderId, sellerId, OrderStatus.CONFIRMED);
+
+        return updated;
     }
 
     // =====================================================
@@ -620,14 +729,17 @@ export class OrdersService {
                 `Chỉ đơn ở trạng thái CONFIRMED mới có thể gửi. Trạng thái hiện tại: ${order.status}`,
             );
 
-        // Ghi shipped_at — dùng để tính timer cho nút "Chưa nhận hàng" ở FE
-        return this.databaseService.order.update({
+        const updated = await this.databaseService.order.update({
             where: { id: orderId },
             data: {
                 status: OrderStatus.SHIPPING,
                 shipped_at: new Date(),
             },
         });
+
+        await this.emitOrderStatusUpdate(orderId, sellerId, OrderStatus.SHIPPING);
+
+        return updated;
     }
 
     // =====================================================
@@ -655,6 +767,8 @@ export class OrdersService {
             });
             await this.paymentsService.markPaid(tx, orderId);
         });
+
+        await this.emitOrderStatusUpdate(orderId, buyerId, OrderStatus.COMPLETED);
 
         return { message: 'Đã xác nhận nhận hàng và thanh toán thành công.' };
     }
@@ -1160,11 +1274,102 @@ export class OrdersService {
     }
 
     // =====================================================
+    // Helper: Emit order status update to chat + create SYSTEM message
+    // =====================================================
+    private async emitOrderStatusUpdate(
+        orderId: string,
+        actionUserId: string,
+        newStatus: OrderStatus,
+    ) {
+        this.logger.debug(`[emitOrderStatusUpdate] START: orderId=${orderId}, actionUserId=${actionUserId}, newStatus=${newStatus}`);
+
+        try {
+            this.logger.debug(`[emitOrderStatusUpdate] Fetching order...`);
+            const order = await this.databaseService.order.findUnique({
+                where: { id: orderId },
+                select: { negotiation_quote_id: true },
+            });
+
+            this.logger.debug(`[emitOrderStatusUpdate] Order found: ${JSON.stringify(order)}`);
+
+            if (!order?.negotiation_quote_id) {
+                this.logger.warn(
+                    `[emitOrderStatusUpdate] ⚠️ Order ${orderId} has NO negotiation_quote_id. This order may not be from a quote. Skipping chat emit.`,
+                );
+                return;
+            }
+
+            this.logger.debug(`[emitOrderStatusUpdate] Fetching quote message by ID: ${order.negotiation_quote_id}`);
+            const quoteMessage = await this.databaseService.chatMessage.findUnique({
+                where: { id: order.negotiation_quote_id },
+                select: { conversation_id: true },
+            });
+
+            this.logger.debug(`[emitOrderStatusUpdate] Quote message found: ${JSON.stringify(quoteMessage)}`);
+
+            if (!quoteMessage?.conversation_id) {
+                this.logger.warn(
+                    `[emitOrderStatusUpdate] ⚠️ Quote message ${order.negotiation_quote_id} has NO conversation_id. Skipping socket emit.`,
+                );
+                return;
+            }
+
+            const conversationId = quoteMessage.conversation_id;
+            this.logger.debug(`[emitOrderStatusUpdate] Conversation ID resolved: ${conversationId}`);
+
+            this.logger.debug(`[emitOrderStatusUpdate] Emitting orderStatusUpdated event to room: ${conversationId}`);
+            this.chatGateway.server.to(conversationId).emit('orderStatusUpdated', {
+                orderId,
+                newStatus,
+                timestamp: new Date(),
+            });
+            this.logger.debug(`[emitOrderStatusUpdate] ✅ Event emitted successfully`);
+
+            const statusLabel = this.getStatusLabel(newStatus);
+            this.logger.debug(`[emitOrderStatusUpdate] Creating SYSTEM message: "${statusLabel}"`);
+
+            const systemMessage = await this.databaseService.chatMessage.create({
+                data: {
+                    conversation_id: conversationId,
+                    sender_id: actionUserId,
+                    message_type: MessageType.SYSTEM,
+                    message_content: `📦 ${statusLabel}`,
+                },
+            });
+
+            this.logger.log(
+                `[emitOrderStatusUpdate] ✅ SUCCESS: Order ${orderId} → ${newStatus}. Socket event emitted to conversation ${conversationId}, SYSTEM message created: ${systemMessage.id}`,
+            );
+        } catch (error) {
+            this.logger.error(
+                `[emitOrderStatusUpdate] ❌ FAILED: Order ${orderId}. Error: ${(error as Error).message}`,
+                (error as Error).stack,
+            );
+        }
+    }
+
+    private getStatusLabel(status: OrderStatus): string {
+        const labels: Record<OrderStatus, string> = {
+            [OrderStatus.PENDING]: 'Đơn hàng chờ xác nhận',
+            [OrderStatus.CONFIRMED]: 'Người bán đã xác nhận đơn hàng',
+            [OrderStatus.SHIPPING]: 'Đơn hàng đang được giao',
+            [OrderStatus.COMPLETED]: 'Đơn hàng đã hoàn thành',
+            [OrderStatus.CANCELLED]: 'Đơn hàng đã bị hủy',
+            [OrderStatus.ISSUE_REPORTED]: 'Người mua báo không nhận được hàng',
+            [OrderStatus.RETURNED]: 'Đơn hàng đã được trả lại',
+            [OrderStatus.REFUND_PENDING]: 'Đợi xử lý hoàn tiền',
+            [OrderStatus.FAILED]: 'Đơn hàng thất bại',
+            [OrderStatus.REFUNDED]: 'Đã hoàn tiền thành công',
+        };
+        return labels[status] || `Trạng thái: ${status}`;
+    }
+
+    // =====================================================
     // SELLER: Dashboard tổng quan
     //
     // Query plan:
     //   1) Cache lookup (60s TTL) — short-circuit khi seller F5 liên tục.
-    //   2) Promise.all 4 query song song:
+    //   2) Promise.all 4 query song parallel:
     //        - getSellerStats        → count + SUM(final_total_price)
     //        - product.count          → activeProducts
     //        - $queryRaw DATE_TRUNC   → revenue theo tháng (gom group tại DB)

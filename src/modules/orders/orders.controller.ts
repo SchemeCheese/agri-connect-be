@@ -45,6 +45,14 @@ export class OrdersController {
         return this.ordersService.getUserOrders(req.user.sub);
     }
 
+    // ─── BUYER: Xem chi tiết 1 đơn hàng ─────────────────────────────────────
+    @UseGuards(RolesGuard)
+    @Roles(UserRole.BUYER)
+    @Get(':id')
+    async getOrderById(@Request() req, @Param('id') orderId: string) {
+        return this.ordersService.getOrderById(req.user.sub, orderId);
+    }
+
     // ─── SELLER: Xem đơn nhận được ───────────────────────────────────────────
     @UseGuards(RolesGuard)
     @Roles(UserRole.SELLER)
