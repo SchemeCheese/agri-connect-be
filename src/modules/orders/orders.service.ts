@@ -1418,10 +1418,30 @@ export class OrdersService {
                     message_type: MessageType.SYSTEM,
                     message_content: messageContent,
                 },
+                include: { sender: { select: { id: true, full_name: true } } },
+            });
+
+            // Phát SYSTEM message NGAY tới phòng chat. KHÔNG có bước này thì FE chỉ
+            // thấy tin nhắn sau khi F5 (DB đã lưu nhưng socket chưa báo). Shape khớp
+            // getMessages + emit('newMessage') ở ChatGateway để BuyerChatWidgetPanel /
+            // SellerChat render đồng nhất (cần `conversationId` camelCase + `sender`).
+            this.chatGateway.server.to(conversationId).emit('newMessage', {
+                id: systemMessage.id,
+                conversationId,
+                sender: systemMessage.sender,
+                message_content: systemMessage.message_content,
+                message_type: systemMessage.message_type,
+                image_url: null,
+                context_product: null,
+                proposed_quantity: null,
+                proposed_price: null,
+                quote: null,
+                orderInfo: null,
+                created_at: systemMessage.created_at,
             });
 
             this.logger.log(
-                `[emitOrderStatusUpdate] ✅ SUCCESS: Order ${orderId} → ${newStatus}. Socket event emitted to conversation ${conversationId}, SYSTEM message created: ${systemMessage.id}`,
+                `[emitOrderStatusUpdate] ✅ SUCCESS: Order ${orderId} → ${newStatus}. Emitted orderStatusUpdated + newMessage to conversation ${conversationId}, SYSTEM message created: ${systemMessage.id}`,
             );
         } catch (error) {
             this.logger.error(
