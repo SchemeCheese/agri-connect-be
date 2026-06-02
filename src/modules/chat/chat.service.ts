@@ -375,9 +375,13 @@ export class ChatService {
       .filter((m) => m.message_type === MessageType.NEGOTIATION_QUOTE)
       .map((m) => m.id);
 
+    // 1 query duy nhất với IN clause → tránh N+1. orderBy desc để đơn MỚI NHẤT
+    // của mỗi quote được ưu tiên (1 quote có thể có nhiều Order khi buyer retry
+    // sau khi đơn cũ bị CANCELLED/FAILED — xem thiết kế negotiation_quote_id).
     const ordersRaw = quoteMessageIds.length
       ? await this.db.order.findMany({
           where: { negotiation_quote_id: { in: quoteMessageIds } },
+          orderBy: { created_at: 'desc' },
           select: {
             id: true,
             negotiation_quote_id: true,
@@ -390,16 +394,24 @@ export class ChatService {
         })
       : [];
 
-    // Map orders by their negotiation_quote_id for O(1) lookup
+    // Map orders by their negotiation_quote_id for O(1) lookup. orderBy desc ở trên +
+    // "chỉ set nếu chưa có" → đơn mới nhất / quote thắng.
     const orderMap = new Map<string, any>();
     for (const order of ordersRaw) {
-      if (order.negotiation_quote_id) {
+      if (order.negotiation_quote_id && !orderMap.has(order.negotiation_quote_id)) {
+        const paymentStatus = order.payments?.[0]?.status ?? null;
         orderMap.set(order.negotiation_quote_id, {
+          // Khóa theo yêu cầu Task 1 (snake_case, tối thiểu cần có)
+          id: order.id,
+          status: order.status,
+          payment_status: paymentStatus,
+          payment_method: order.payment_method,
+          // Khóa tương thích ngược với FE hiện tại (NegotiationQuoteCard.QuoteOrderInfo)
           orderId: order.id,
+          orderStatus: order.status,
+          paymentStatus,
           checkoutSessionId: order.checkout_session_id ?? undefined,
           totalAmount: order.final_total_price ? Number(order.final_total_price) : 0,
-          paymentStatus: order.payments?.[0]?.status as any,
-          orderStatus: order.status,
         });
       }
     }
