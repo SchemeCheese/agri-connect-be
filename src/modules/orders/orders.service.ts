@@ -843,7 +843,12 @@ export class OrdersService {
             },
         });
 
-        await this.emitOrderStatusUpdate(orderId, buyerId, OrderStatus.ISSUE_REPORTED);
+        await this.emitOrderStatusUpdate(
+            orderId,
+            buyerId,
+            OrderStatus.ISSUE_REPORTED,
+            '⚠️ Người mua đã báo cáo sự cố chưa nhận được hàng.',
+        );
 
         try {
             // Gửi email xác nhận cho BUYER
@@ -1354,6 +1359,9 @@ export class OrdersService {
         orderId: string,
         actionUserId: string,
         newStatus: OrderStatus,
+        // Nội dung SYSTEM message tuỳ chỉnh cho từng hành động (vd reportIssue).
+        // Bỏ trống → fallback về nhãn mặc định "📦 <statusLabel>".
+        customContent?: string,
     ) {
         this.logger.debug(`[emitOrderStatusUpdate] START: orderId=${orderId}, actionUserId=${actionUserId}, newStatus=${newStatus}`);
 
@@ -1400,14 +1408,15 @@ export class OrdersService {
             this.logger.debug(`[emitOrderStatusUpdate] ✅ Event emitted successfully`);
 
             const statusLabel = this.getStatusLabel(newStatus);
-            this.logger.debug(`[emitOrderStatusUpdate] Creating SYSTEM message: "${statusLabel}"`);
+            const messageContent = customContent ?? `📦 ${statusLabel}`;
+            this.logger.debug(`[emitOrderStatusUpdate] Creating SYSTEM message: "${messageContent}"`);
 
             const systemMessage = await this.databaseService.chatMessage.create({
                 data: {
                     conversation_id: conversationId,
                     sender_id: actionUserId,
                     message_type: MessageType.SYSTEM,
-                    message_content: `📦 ${statusLabel}`,
+                    message_content: messageContent,
                 },
             });
 
