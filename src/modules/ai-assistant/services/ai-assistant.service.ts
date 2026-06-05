@@ -1,17 +1,22 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { AIMode, Prisma } from '@prisma/client';
 import { DatabaseService } from '../../../database/database.service';
 import { AskQuestionDto } from '../dtos/ask-question.dto';
-import { LLM_PROVIDER } from '../providers/llm.interface';
 import type {
   ILLMProvider,
+  LLMCompleteResult,
+  LLMCompleteWithToolsOptions,
+  LLMCompleteWithToolsResult,
   LLMConversationMessage,
   LLMMessage,
+  LLMStreamOptions,
   LLMToolCallMessage,
   LLMToolResultMessage,
 } from '../providers/llm.interface';
 import { textOfContent } from '../providers/llm.interface';
+import { GeminiProvider } from '../providers/gemini.provider';
+import { GroqProvider } from '../providers/groq.provider';
 import { buildSystemPrompt, SystemPromptContext } from '../prompts/system.prompt';
 import { BUYER_FAQ_CACHE } from '../prompts/buyer.prompt';
 import { SELLER_FAQ_CACHE } from '../prompts/seller.prompt';
@@ -30,6 +35,15 @@ const FAST_MODEL = 'gemini-2.5-flash-lite';
 // Vision model cho phân tích ảnh sản phẩm. Spec gốc yêu cầu gemini-1.5-flash
 // nhưng Google đã retire model đó (09/2025) — 2.5-flash là bản thay thế chính thức.
 const VISION_MODEL = 'gemini-2.5-flash';
+
+// Model Groq tương đương khi fallback (Gemini rate limit / 5xx). Model id của
+// Gemini không tồn tại trên Groq nên bắt buộc phải remap. Llama 3.x trên Groq
+// hỗ trợ tool calling nhưng KHÔNG có vision — query kèm ảnh không fallback.
+const GROQ_FALLBACK_MODEL: Record<string, string> = {
+  [REASONING_MODEL]: 'llama-3.3-70b-versatile',
+  [FAST_MODEL]: 'llama-3.1-8b-instant',
+};
+const GROQ_DEFAULT_FALLBACK = 'llama-3.3-70b-versatile';
 
 const SUGGEST_PRODUCT_PROMPT =
   'You are an agricultural expert. Analyze this image. ' +
@@ -112,7 +126,10 @@ export class AIAssistantService {
   private readonly logger = new Logger(AIAssistantService.name);
 
   constructor(
-    @Inject(LLM_PROVIDER) private readonly llm: ILLMProvider,
+    // Inject trực tiếp cả 2 provider để orchestrate fallback ở service layer:
+    // Gemini-first, lỗi (rate limit / 5xx) trên text query → Groq.
+    private readonly gemini: GeminiProvider,
+    private readonly groq: GroqProvider,
     private readonly db: DatabaseService,
     private readonly config: ConfigService,
     private readonly sanitizer: InputSanitizer,
@@ -122,6 +139,68 @@ export class AIAssistantService {
     private readonly rateLimitService: RateLimitService,
     private readonly toolExecutor: ToolExecutorService,
   ) {}
+
+  // ─── LLM orchestration: Gemini-first, Groq fallback ─────────────────────────
+
+  private groqModelFor(geminiModel: string): string {
+    return GROQ_FALLBACK_MODEL[geminiModel] ?? GROQ_DEFAULT_FALLBACK;
+  }
+
+  /**
+   * Stream Gemini-first. Fallback sang Groq CHỈ khi:
+   * - không có ảnh (Groq Llama text-only — flatten ảnh sẽ trả lời sai), VÀ
+   * - Gemini chưa yield token nào (FE đã nhận partial content thì retry
+   *   từ đầu sẽ duplicate nội dung trên màn hình người dùng).
+   */
+  private async *executeLLMStream(
+    options: LLMStreamOptions,
+    hasImage: boolean,
+  ): AsyncGenerator<string> {
+    let yielded = false;
+    try {
+      for await (const token of this.gemini.stream(options)) {
+        yielded = true;
+        yield token;
+      }
+      return;
+    } catch (err) {
+      if (hasImage || yielded) throw err;
+      this.logger.warn(`Gemini failed, falling back to Groq: ${(err as Error).message}`);
+    }
+    yield* this.groq.stream({ ...options, model: this.groqModelFor(options.model) });
+  }
+
+  /** Completion Gemini-first; text query lỗi → Groq, có ảnh thì throw. */
+  private async executeLLMComplete(
+    options: LLMStreamOptions,
+    hasImage: boolean,
+  ): Promise<LLMCompleteResult> {
+    try {
+      return await this.gemini.complete(options);
+    } catch (err) {
+      if (hasImage) throw err;
+      this.logger.warn(`Gemini failed, falling back to Groq: ${(err as Error).message}`);
+      return this.groq.complete({ ...options, model: this.groqModelFor(options.model) });
+    }
+  }
+
+  /**
+   * Tool detection cũng fallback (Groq Llama hỗ trợ tool calling) — không có
+   * lớp này thì khi Gemini sập, tool loop break sớm → grounding rơi vào nhánh
+   * NO DATA và user nhận "không có dữ liệu" thay vì câu trả lời từ Groq.
+   */
+  private async executeLLMCompleteWithTools(
+    options: LLMCompleteWithToolsOptions,
+    hasImage: boolean,
+  ): Promise<LLMCompleteWithToolsResult> {
+    try {
+      return await this.gemini.completeWithTools(options);
+    } catch (err) {
+      if (hasImage) throw err;
+      this.logger.warn(`Gemini failed, falling back to Groq: ${(err as Error).message}`);
+      return this.groq.completeWithTools({ ...options, model: this.groqModelFor(options.model) });
+    }
+  }
 
   async ask(userId: string, dto: AskQuestionDto): Promise<AskResult> {
     // ── 1. Rate limit ────────────────────────────────────────────────────────
@@ -234,7 +313,9 @@ export class AIAssistantService {
    * nhận HTTP 200 và tự fallback sang nhập tay.
    */
   async suggestProductFromImage(base64: string, mime: string): Promise<ProductSuggestion> {
-    if (!this.llm.completeWithImage) {
+    // Vision đi thẳng Gemini — Groq text-only nên không có fallback cho ảnh;
+    // lỗi rơi xuống catch dưới → EMPTY_SUGGESTION, FE fallback nhập tay.
+    if (!this.gemini.completeWithImage) {
       this.logger.warn('suggestProductFromImage: LLM provider has no vision support');
       return { ...EMPTY_SUGGESTION };
     }
@@ -243,7 +324,7 @@ export class AIAssistantService {
     const imageBase64 = base64.replace(/^data:[^;]+;base64,/, '');
 
     try {
-      const result = await this.llm.completeWithImage({
+      const result = await this.gemini.completeWithImage({
         model: VISION_MODEL,
         systemInstruction: SUGGEST_PRODUCT_PROMPT,
         imageBase64,
@@ -299,6 +380,8 @@ export class AIAssistantService {
     ctx: ToolExecutionContext,
   ): AsyncGenerator<string | ToolStatusEvent> {
     const workingMessages: LLMConversationMessage[] = [...initialMessages];
+    // Có ảnh trong lượt hỏi này → không được fallback Groq (text-only)
+    const hasImage = messagesContainImage(initialMessages);
     const toolsCalled: string[] = [];
     // Whitelist các entity được phép xuất hiện trong câu trả lời — extract từ tool result
     const validEntities = new Set<string>();
@@ -318,13 +401,17 @@ export class AIAssistantService {
     for (let round = 0; round < roundBudget; round++) {
       let toolResponse: Awaited<ReturnType<ILLMProvider['completeWithTools']>>;
       try {
-        toolResponse = await this.llm.completeWithTools({
-          model: FAST_MODEL,
-          messages: workingMessages,
-          tools: AGRI_TOOLS,
-          maxTokens: 256,
-          temperature: 0.1,
-        });
+        toolResponse = await this.executeLLMCompleteWithTools(
+          {
+            model: FAST_MODEL,
+            // Strip ảnh khỏi history — chỉ user message cuối được giữ image part
+            messages: this.sanitizeHistoryImages(workingMessages),
+            tools: AGRI_TOOLS,
+            maxTokens: 256,
+            temperature: 0.1,
+          },
+          hasImage,
+        );
       } catch (err) {
         this.logger.warn(`Tool detection failed (round ${round + 1}): ${(err as Error).message}`);
         break;
@@ -442,6 +529,45 @@ Câu trả lời chỉ gồm ĐÚNG 1 đoạn thông báo trên. Có thể kết
   }
 
   /**
+   * Chống token explosion: CHỈ user message cuối cùng được phép mang image part.
+   * Mọi image part ở các message trước đó bị thay bằng text placeholder.
+   *
+   * Hiện tại history không thể chứa ảnh (buildContextMessages đọc từ DB —
+   * content là string, ảnh chỉ lưu marker "[📷 kèm ảnh]"), nên đây là
+   * defense-in-depth: nếu sau này có chỗ nhét ảnh vào history (persist ảnh,
+   * replay session...), mỗi ảnh ~340KB base64 sẽ nhân lên theo số lượt chat
+   * và phá vỡ context window + payload limit của Gemini.
+   *
+   * Lưu ý: mốc là user message CUỐI chứ không phải phần tử cuối của mảng —
+   * trong tool loop, tool result + grounding system message nằm SAU user
+   * message hiện tại, strip "tất cả trừ phần tử cuối" sẽ xoá nhầm ảnh của
+   * chính lượt hỏi này.
+   */
+  private sanitizeHistoryImages(messages: LLMConversationMessage[]): LLMConversationMessage[] {
+    let lastUserIdx = -1;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].role === 'user') {
+        lastUserIdx = i;
+        break;
+      }
+    }
+
+    return messages.map((msg, idx) => {
+      if (idx === lastUserIdx || msg.role === 'tool') return msg;
+      const content = (msg as LLMMessage).content;
+      if (!Array.isArray(content) || !content.some((p) => p.type === 'image')) return msg;
+      return {
+        ...msg,
+        content: content.map((p) =>
+          p.type === 'image'
+            ? { type: 'text' as const, text: '[User uploaded an image previously]' }
+            : p,
+        ),
+      } as LLMConversationMessage;
+    });
+  }
+
+  /**
    * Extract entity names (store_name, product name, seller name) từ tool result
    * để build whitelist chống hallucination.
    */
@@ -472,12 +598,18 @@ Câu trả lời chỉ gồm ĐÚNG 1 đoạn thông báo trên. Có thể kết
    */
   private async *streamAndSave(
     sessionId: string,
-    messages: LLMConversationMessage[],
+    rawMessages: LLMConversationMessage[],
     model: string,
     intent: IntentLabel,
     toolsCalled: string[] = [],
     validation?: { validEntities?: Set<string>; toolItemCount: number },
   ): AsyncGenerator<string> {
+    // Strip ảnh khỏi history trước khi gửi LLM — chỉ user message cuối giữ ảnh.
+    // Token estimate + summarization phía dưới cũng dùng bản đã sanitize.
+    const messages = this.sanitizeHistoryImages(rawMessages);
+    // Ảnh còn lại (lượt hỏi hiện tại) → chặn fallback Groq trong executeLLMStream
+    const hasImage = messagesContainImage(messages);
+
     // Pre-compute input-side tokens ONCE before streaming. The messages array
     // is immutable from here, and waiting to reduce after the stream just
     // delays generator close. Char-based (len/4) is the same heuristic as
@@ -490,7 +622,10 @@ Câu trả lời chỉ gồm ĐÚNG 1 đoạn thông báo trên. Có thể kết
 
     try {
       // temperature thấp để giảm hallucination — câu trả lời cần bám tool result/context
-      for await (const token of this.llm.stream({ model, messages, maxTokens, temperature: 0.3 })) {
+      for await (const token of this.executeLLMStream(
+        { model, messages, maxTokens, temperature: 0.3 },
+        hasImage,
+      )) {
         fullContent += token;
         yield token;
       }
@@ -545,19 +680,23 @@ Câu trả lời chỉ gồm ĐÚNG 1 đoạn thông báo trên. Có thể kết
 
       const summaryContent = oldMessages.map((m) => `${m.role}: ${textOfContent(m.content)}`).join('\n');
 
-      const result = await this.llm.complete({
-        model: FAST_MODEL,
-        messages: [
-          {
-            role: 'system',
-            content:
-              'Tóm tắt ngắn gọn trong 2-3 câu (tiếng Việt): sản phẩm đã hỏi, giá đã biết, quyết định đã đưa ra. Chỉ facts, không nhận xét.',
-          },
-          { role: 'user', content: summaryContent },
-        ],
-        maxTokens: 150,
-        temperature: 0.1,
-      });
+      // Summary luôn là text thuần (textOfContent đã bỏ ảnh) → fallback được
+      const result = await this.executeLLMComplete(
+        {
+          model: FAST_MODEL,
+          messages: [
+            {
+              role: 'system',
+              content:
+                'Tóm tắt ngắn gọn trong 2-3 câu (tiếng Việt): sản phẩm đã hỏi, giá đã biết, quyết định đã đưa ra. Chỉ facts, không nhận xét.',
+            },
+            { role: 'user', content: summaryContent },
+          ],
+          maxTokens: 150,
+          temperature: 0.1,
+        },
+        false,
+      );
 
       await this.sessionService.writeSummary(sessionId, result.content);
     } catch (err: unknown) {
@@ -656,6 +795,14 @@ Câu trả lời chỉ gồm ĐÚNG 1 đoạn thông báo trên. Có thể kết
 }
 
 const SLIDING_WINDOW_FOR_SUMMARY = 8;
+
+/** True nếu có bất kỳ message nào mang image part — quyết định cho phép fallback Groq hay không. */
+function messagesContainImage(messages: LLMConversationMessage[]): boolean {
+  return messages.some((m) => {
+    const c = (m as LLMMessage).content;
+    return Array.isArray(c) && c.some((p) => p.type === 'image');
+  });
+}
 
 /**
  * Cheap ~4-chars-per-token estimate over the message stream. Hoisted out of

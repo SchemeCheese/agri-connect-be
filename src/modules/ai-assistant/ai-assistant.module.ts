@@ -10,6 +10,7 @@ import { RateLimitService } from './services/rate-limit.service';
 import { EmbeddingService } from './services/embedding.service';
 import { SemanticSearchService } from './services/semantic-search.service';
 import { GeminiProvider } from './providers/gemini.provider';
+import { GroqProvider } from './providers/groq.provider';
 import { InputSanitizer } from './security/input-sanitizer';
 import { OutputValidator } from './security/output-validator';
 import { LLM_PROVIDER } from './providers/llm.interface';
@@ -34,8 +35,13 @@ import { ToolExecutorService } from './tools/tool-executor.service';
   ],
   controllers: [AIAssistantController],
   providers: [
-    // LLM provider — swap to Claude/OpenAI/Groq by replacing GeminiProvider
-    { provide: LLM_PROVIDER, useClass: GeminiProvider },
+    // Cả 2 provider đăng ký standalone — AIAssistantService inject trực tiếp
+    // để orchestrate fallback Gemini → Groq khi rate limit / 5xx.
+    GeminiProvider,
+    GroqProvider,
+    // Token generic vẫn trỏ Gemini (useExisting → cùng instance) cho các
+    // consumer không cần biết fallback, vd IntentClassifierService.
+    { provide: LLM_PROVIDER, useExisting: GeminiProvider },
 
     // Security
     InputSanitizer,
