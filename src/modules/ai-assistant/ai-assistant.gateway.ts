@@ -130,7 +130,7 @@ export class AIAssistantGateway implements OnGatewayConnection, OnGatewayDisconn
     try {
       const result = await this.aiService.ask(userId, data);
 
-      // Stream tokens to client — phân biệt text chunk vs tool status event
+      // Stream tokens to client — phân biệt text chunk vs tool status vs actionable data
       let tokenCount = 0;
       for await (const chunk of result.stream) {
         if (!client.connected) break;
@@ -141,6 +141,10 @@ export class AIAssistantGateway implements OnGatewayConnection, OnGatewayDisconn
             toolName: status.toolName,
             label: status.label,
           });
+        } else if (typeof chunk === 'object' && chunk !== null && (chunk as any).__actionable_data__) {
+          // Entity cards từ tool result — FE render product/shop card clickable
+          const evt = chunk as { type: 'products' | 'shops'; data: any[] };
+          this.emitActionableData(client.id, evt.type, evt.data, result.sessionId);
         } else {
           client.emit('ai:token', {
             chunk,
@@ -172,6 +176,24 @@ export class AIAssistantGateway implements OnGatewayConnection, OnGatewayDisconn
   }
 
   // ── Helpers ─────────────────────────────────────────────────────────────────
+
+  /**
+   * Đẩy entity cards (sản phẩm/shop từ tool result) về 1 client cụ thể.
+   * socket.io v4: mỗi socket tự join room trùng tên socket.id → server.to(clientId)
+   * nhắm đúng client đó trong namespace /ai-chat.
+   *
+   * Event: ai:actionable_data
+   * Payload: { type: 'products'|'shops', data: [...], sessionId? }
+   */
+  emitActionableData(
+    clientId: string,
+    type: 'products' | 'shops',
+    data: any[],
+    sessionId?: string,
+  ) {
+    if (!Array.isArray(data) || data.length === 0) return;
+    this.server.to(clientId).emit('ai:actionable_data', { type, data, sessionId: sessionId ?? null });
+  }
 
   private requireAuth(client: Socket): string {
     const userId = client.data?.userId;

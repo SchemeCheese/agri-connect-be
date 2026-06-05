@@ -28,6 +28,8 @@ import { RateLimitService } from './rate-limit.service';
 import { IntentLabel } from '../prompts/intent-classifier.prompt';
 import { ToolExecutorService } from '../tools/tool-executor.service';
 import { AGRI_TOOLS } from '../tools/tool-registry';
+import type { ProductSummary } from '../tools/product-search.tool';
+import type { SellerScore } from '../tools/seller-recommendation.tool';
 import { TOOL_WHITELIST, ToolExecutionContext, ToolName, MAX_TOOL_ROUNDS } from '../tools/types';
 
 const REASONING_MODEL = 'gemini-2.5-flash';
@@ -84,7 +86,7 @@ const INJECTION_RESPONSE =
 export interface AskResult {
   sessionId: string;
   intent: IntentLabel;
-  stream: AsyncGenerator<string | ToolStatusEvent>;
+  stream: AsyncGenerator<string | ToolStatusEvent | ActionableDataEvent>;
 }
 
 /** Gợi ý sản phẩm từ ảnh — mọi field nullable để FE luôn nhận 200 kể cả khi AI fail. */
@@ -110,6 +112,35 @@ export interface ToolStatusEvent {
   __tool_status__: true;
   toolName: string;
   label: string;
+}
+
+/**
+ * Entity cards gửi kèm stream để FE render UI có link THẬT (anti-hallucination:
+ * LLM không được tự sinh link/ID — card data lấy thẳng từ tool result/DB).
+ * Gateway nhận diện shape này → emit ai:actionable_data thay vì ai:token.
+ */
+export interface ActionableDataEvent {
+  __actionable_data__: true;
+  type: 'products' | 'shops';
+  data: Array<Record<string, unknown>>;
+}
+
+/** Card sản phẩm — khớp ProductCardList bên FE (AIAssistantPanel). */
+interface ProductCard {
+  id: string;
+  name: string;
+  price: number;
+  unit: string | null;
+  image_url: string | null;
+}
+
+/** Card cửa hàng — khớp ShopCardList bên FE. */
+interface ShopCard {
+  seller_id: string;
+  shop_name: string | null;
+  avatar_url: string | null;
+  avg_rating: number | null;
+  verdict: string | null;
 }
 
 const TOOL_STATUS_LABELS: Record<string, string> = {
@@ -287,7 +318,9 @@ export class AIAssistantService {
       { role: 'user', content: userContent },
     ];
 
-    const model = COMPLEX_INTENTS.includes(intent) ? REASONING_MODEL : FAST_MODEL;
+    // Có ảnh → LUÔN dùng reasoning model: flash-lite nhận diện ảnh yếu, hay
+    // trả lời "không thấy ảnh" dù inlineData đã gửi kèm.
+    const model = hasImage || COMPLEX_INTENTS.includes(intent) ? REASONING_MODEL : FAST_MODEL;
     const useTools = TOOL_REQUIRED_INTENTS.includes(intent);
 
     // ── 7. Save user message before streaming ────────────────────────────────
@@ -378,7 +411,7 @@ export class AIAssistantService {
     model: string,
     intent: IntentLabel,
     ctx: ToolExecutionContext,
-  ): AsyncGenerator<string | ToolStatusEvent> {
+  ): AsyncGenerator<string | ToolStatusEvent | ActionableDataEvent> {
     const workingMessages: LLMConversationMessage[] = [...initialMessages];
     // Có ảnh trong lượt hỏi này → không được fallback Groq (text-only)
     const hasImage = messagesContainImage(initialMessages);
@@ -396,14 +429,16 @@ export class AIAssistantService {
         : MAX_TOOL_ROUNDS;
 
     // Tool detection + execution loop (non-streaming)
-    // Luôn dùng FAST_MODEL cho tool detection — chỉ cần nhận diện tool/argument,
-    // không cần reasoning sâu. Tiết kiệm 500-1500ms/round so với 70b.
+    // Text-only: FAST_MODEL là đủ — chỉ cần nhận diện tool/argument, không cần
+    // reasoning sâu, tiết kiệm 500-1500ms/round. CÓ ẢNH: phải dùng model đã
+    // chọn (reasoning) — argument của tool (vd từ khóa search_products) phải
+    // suy ra TỪ ẢNH, flash-lite nhận diện ảnh yếu sẽ gọi tool với keyword sai.
     for (let round = 0; round < roundBudget; round++) {
       let toolResponse: Awaited<ReturnType<ILLMProvider['completeWithTools']>>;
       try {
         toolResponse = await this.executeLLMCompleteWithTools(
           {
-            model: FAST_MODEL,
+            model: hasImage ? model : FAST_MODEL,
             // Strip ảnh khỏi history — chỉ user message cuối được giữ image part
             messages: this.sanitizeHistoryImages(workingMessages),
             tools: AGRI_TOOLS,
@@ -462,6 +497,13 @@ export class AIAssistantService {
         const items = this.extractEntities(outcome.result);
         for (const name of items) validEntities.add(name);
         totalToolItems += items.length;
+      }
+
+      // Tool trả entity thật (sản phẩm/shop) → đẩy card data về FE để render
+      // UI clickable. Link/ảnh build từ DB tại đây — KHÔNG để LLM tự sinh.
+      for (const outcome of outcomes) {
+        const actionable = await this.buildActionableEvent(outcome.toolName, outcome.result);
+        if (actionable) yield actionable;
       }
 
       this.logger.log(
@@ -565,6 +607,71 @@ Câu trả lời chỉ gồm ĐÚNG 1 đoạn thông báo trên. Có thể kết
         ),
       } as LLMConversationMessage;
     });
+  }
+
+  /**
+   * Build ActionableDataEvent từ tool result để FE render card clickable.
+   * - search_products → product cards (kèm ảnh đầu tiên từ Attachment PRODUCT)
+   * - recommend_sellers → shop cards (kèm avatar từ Attachment AVATAR)
+   * Tool khác / result rỗng / lỗi enrich → null (stream không bị ảnh hưởng).
+   */
+  private async buildActionableEvent(
+    toolName: string,
+    result: unknown,
+  ): Promise<ActionableDataEvent | null> {
+    const res = result as { success?: boolean; data?: unknown } | null | undefined;
+    if (!res?.success || !Array.isArray(res.data) || res.data.length === 0) return null;
+
+    try {
+      if (toolName === 'search_products') {
+        const products = (res.data as ProductSummary[]).filter((p) => p?.id).slice(0, 6);
+        if (products.length === 0) return null;
+
+        // Ảnh không có trong ProductSummary (tool trả gọn cho LLM) — lấy từ
+        // Attachment như products.service, mỗi sản phẩm 1 ảnh đầu tiên là đủ.
+        const images = await this.db.attachment.findMany({
+          where: { target_id: { in: products.map((p) => p.id) }, target_type: 'PRODUCT' },
+          select: { target_id: true, url: true },
+        });
+        const imageMap = new Map<string, string>();
+        for (const img of images) {
+          if (!imageMap.has(img.target_id)) imageMap.set(img.target_id, img.url);
+        }
+
+        const data: ProductCard[] = products.map((p) => ({
+          id: p.id,
+          name: p.name,
+          price: Number(p.reference_price),
+          unit: p.unit ?? null,
+          image_url: imageMap.get(p.id) ?? null,
+        }));
+        return { __actionable_data__: true, type: 'products', data: data as unknown as Array<Record<string, unknown>> };
+      }
+
+      if (toolName === 'recommend_sellers') {
+        const sellers = (res.data as SellerScore[]).filter((s) => s?.seller_id).slice(0, 6);
+        if (sellers.length === 0) return null;
+
+        const avatars = await this.db.attachment.findMany({
+          where: { target_id: { in: sellers.map((s) => s.seller_id) }, target_type: 'AVATAR' },
+          select: { target_id: true, url: true },
+        });
+        const avatarMap = new Map(avatars.map((a) => [a.target_id, a.url]));
+
+        const data: ShopCard[] = sellers.map((s) => ({
+          seller_id: s.seller_id,
+          shop_name: s.store_name ?? null,
+          avatar_url: avatarMap.get(s.seller_id) ?? null,
+          avg_rating: s.stats?.avg_rating ?? null,
+          verdict: s.verdict ?? null,
+        }));
+        return { __actionable_data__: true, type: 'shops', data: data as unknown as Array<Record<string, unknown>> };
+      }
+    } catch (err) {
+      // Enrich fail (DB lỗi...) → bỏ card, KHÔNG làm gãy stream trả lời
+      this.logger.warn(`buildActionableEvent(${toolName}) failed: ${(err as Error).message}`);
+    }
+    return null;
   }
 
   /**
