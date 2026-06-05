@@ -2,9 +2,32 @@ export const LLM_PROVIDER = Symbol('LLM_PROVIDER');
 
 // ─── Basic message types ────────────────────────────────────────────────────
 
+/**
+ * Một phần nội dung trong message đa phương thức.
+ * Hiện chỉ user message dùng image part (ảnh đính kèm trong AI chat);
+ * system/assistant luôn là text thuần.
+ */
+export type LLMContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'image'; imageBase64: string; mimeType: string };
+
 export interface LLMMessage {
   role: 'system' | 'user' | 'assistant';
-  content: string;
+  /** String thuần hoặc mảng chunks (text + inline image) cho vision model. */
+  content: string | LLMContentPart[];
+}
+
+/**
+ * Flatten content về text — multimodal thì ghép các text part, bỏ qua ảnh.
+ * Dùng cho provider text-only (Groq), token estimate, và summarization.
+ */
+export function textOfContent(content: string | LLMContentPart[] | null): string {
+  if (content == null) return '';
+  if (typeof content === 'string') return content;
+  return content
+    .filter((p): p is Extract<LLMContentPart, { type: 'text' }> => p.type === 'text')
+    .map((p) => p.text)
+    .join('\n');
 }
 
 // ─── Tool calling types ─────────────────────────────────────────────────────
@@ -63,6 +86,20 @@ export interface LLMCompleteResult {
   model: string;
 }
 
+export interface LLMImageCompleteOptions {
+  model: string;
+  /** Instructions for the vision analysis (system role). */
+  systemInstruction: string;
+  /** Raw base64 payload — no data-URI prefix. */
+  imageBase64: string;
+  /** e.g. 'image/jpeg' */
+  mimeType: string;
+  /** When true, ask the provider for strict JSON output (Gemini: responseMimeType). */
+  jsonOutput?: boolean;
+  maxTokens?: number;
+  temperature?: number;
+}
+
 export interface LLMCompleteWithToolsOptions {
   model: string;
   messages: LLMConversationMessage[];
@@ -96,4 +133,11 @@ export interface ILLMProvider {
 
   /** Tool-enabled completion (non-streaming) — used for tool detection loop. */
   completeWithTools(options: LLMCompleteWithToolsOptions): Promise<LLMCompleteWithToolsResult>;
+
+  /**
+   * Vision completion over a single inline image — used for product suggestion.
+   * Optional: text-only providers (e.g. Groq Llama) may not implement it;
+   * callers must degrade gracefully when absent.
+   */
+  completeWithImage?(options: LLMImageCompleteOptions): Promise<LLMCompleteResult>;
 }

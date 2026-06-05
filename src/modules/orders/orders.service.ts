@@ -248,7 +248,7 @@ export class OrdersService {
         const allProductIds = dto.seller_orders.flatMap((so) => so.items.map((i) => i.product_id));
         const dbProducts = await this.databaseService.product.findMany({
             where: { id: { in: allProductIds } },
-            select: { id: true, seller_id: true, is_active: true },
+            select: { id: true, seller_id: true, is_active: true, reference_price: true },
         });
 
         if (dbProducts.length !== allProductIds.length) {
@@ -308,11 +308,12 @@ export class OrdersService {
                     const { seller_id: sellerId, items, voucher_code } = sellerOrder;
                     // Seller đã được validate batched bên ngoài $transaction (xem sellerMap ở trên).
 
-                    // Tính subtotal
-                    const subtotal = items.reduce(
-                        (sum, item) => sum + Number(item.price) * Number(item.quantity),
-                        0,
-                    );
+                    // Tính subtotal — KHÔNG tin item.price từ client; dùng reference_price
+                    // lấy từ DB (productMap) để chống thao túng giá phía client.
+                    const subtotal = items.reduce((sum, item) => {
+                        const p = productMap.get(item.product_id)!;
+                        return sum + Number(p.reference_price) * Number(item.quantity);
+                    }, 0);
 
                     // ── Validate + áp dụng voucher riêng của shop này ─────────────────
                     let voucherId: string | null = null;
@@ -373,6 +374,27 @@ export class OrdersService {
                         voucherId = voucher.id;
                     }
 
+                    // ── Atomic stock decrement check ──────────────────────────────
+                    // Trừ tồn kho có điều kiện NGAY trong $transaction, TRƯỚC khi tạo
+                    // Order. updateMany với where(stock_quantity >= quantity) dịch ra
+                    // `UPDATE ... WHERE stock_quantity >= n` — Postgres row-lock đảm bảo
+                    // hai checkout song song không thể oversell. count===0 ⇒ không đủ
+                    // hàng ⇒ throw → transaction rollback (hoàn lại các decrement trước đó).
+                    for (const item of items) {
+                        const stockUpdate = await prisma.product.updateMany({
+                            where: {
+                                id: item.product_id,
+                                stock_quantity: { gte: item.quantity },
+                            },
+                            data: {
+                                stock_quantity: { decrement: item.quantity },
+                            },
+                        });
+                        if (stockUpdate.count === 0) {
+                            throw new BadRequestException('Product out of stock');
+                        }
+                    }
+
                     // Tạo Order
                     const newOrder = await prisma.order.create({
                         data: {
@@ -387,10 +409,11 @@ export class OrdersService {
                             discount_amount: discountAmount,
                             status: 'PENDING',
                             order_items: {
+                                // negotiated_price cũng lấy từ DB reference_price (không tin client)
                                 create: items.map((item) => ({
                                     product_id: item.product_id,
                                     quantity: item.quantity,
-                                    negotiated_price: item.price,
+                                    negotiated_price: Number(productMap.get(item.product_id)!.reference_price),
                                 })),
                             },
                         },

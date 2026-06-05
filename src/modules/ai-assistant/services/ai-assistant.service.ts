@@ -11,6 +11,7 @@ import type {
   LLMToolCallMessage,
   LLMToolResultMessage,
 } from '../providers/llm.interface';
+import { textOfContent } from '../providers/llm.interface';
 import { buildSystemPrompt, SystemPromptContext } from '../prompts/system.prompt';
 import { BUYER_FAQ_CACHE } from '../prompts/buyer.prompt';
 import { SELLER_FAQ_CACHE } from '../prompts/seller.prompt';
@@ -24,8 +25,18 @@ import { ToolExecutorService } from '../tools/tool-executor.service';
 import { AGRI_TOOLS } from '../tools/tool-registry';
 import { TOOL_WHITELIST, ToolExecutionContext, ToolName, MAX_TOOL_ROUNDS } from '../tools/types';
 
-const REASONING_MODEL = 'llama-3.3-70b-versatile';
-const FAST_MODEL = 'llama-3.1-8b-instant';
+const REASONING_MODEL = 'gemini-2.5-flash';
+const FAST_MODEL = 'gemini-2.5-flash-lite';
+// Vision model cho phân tích ảnh sản phẩm. Spec gốc yêu cầu gemini-1.5-flash
+// nhưng Google đã retire model đó (09/2025) — 2.5-flash là bản thay thế chính thức.
+const VISION_MODEL = 'gemini-2.5-flash';
+
+const SUGGEST_PRODUCT_PROMPT =
+  'You are an agricultural expert. Analyze this image. ' +
+  'Return ONLY a JSON object with: { name: string, category_name: string, ' +
+  'suggested_unit: string, description: string, confidence: number }. ' +
+  'All string values must be in Vietnamese. "confidence" is a number between 0 and 1. ' +
+  'If the image does not show an agricultural product, return all string fields as null and confidence 0.';
 
 const COMPLEX_INTENTS: IntentLabel[] = ['PRICE_ANALYSIS', 'NEGOTIATION_SUPPORT'];
 
@@ -61,6 +72,23 @@ export interface AskResult {
   intent: IntentLabel;
   stream: AsyncGenerator<string | ToolStatusEvent>;
 }
+
+/** Gợi ý sản phẩm từ ảnh — mọi field nullable để FE luôn nhận 200 kể cả khi AI fail. */
+export interface ProductSuggestion {
+  name: string | null;
+  category_name: string | null;
+  suggested_unit: string | null;
+  description: string | null;
+  confidence: number | null;
+}
+
+const EMPTY_SUGGESTION: ProductSuggestion = {
+  name: null,
+  category_name: null,
+  suggested_unit: null,
+  description: null,
+  confidence: null,
+};
 
 // Sự kiện trạng thái gửi giữa các token để FE hiển thị "Đang ..." labels.
 // Gateway phân biệt: nếu chunk có shape ToolStatusEvent → emit ai:tool_start, else ai:token.
@@ -114,6 +142,14 @@ export class AIAssistantService {
       return this.staticResponse('', 'OFF_TOPIC', msg);
     }
 
+    // ── 2b. Ảnh đính kèm (nếu có) ────────────────────────────────────────────
+    // FE thường gửi nguyên data URI — strip prefix; mime ưu tiên field riêng,
+    // fallback suy từ prefix. Cả 2 model (2.5-flash / flash-lite) đều multimodal.
+    const imageBase64 = dto.imageBase64?.replace(/^data:[^;]+;base64,/, '');
+    const imageMime =
+      dto.imageMimeType ?? dto.imageBase64?.match(/^data:([^;]+);base64,/)?.[1] ?? 'image/jpeg';
+    const hasImage = !!imageBase64;
+
     // ── 3. Session ───────────────────────────────────────────────────────────
     const session = await this.sessionService.getOrCreate(
       userId,
@@ -123,7 +159,8 @@ export class AIAssistantService {
     );
 
     // ── 4. Static FAQ cache — bypass LLM entirely ────────────────────────────
-    const faqHit = this.checkFaqCache(sanitized.sanitized, dto.mode);
+    // Có ảnh thì không dùng cache: câu trả lời tĩnh sẽ bỏ qua nội dung ảnh.
+    const faqHit = hasImage ? null : this.checkFaqCache(sanitized.sanitized, dto.mode);
     if (faqHit) {
       await this.sessionService.saveUserMessage(session.id, sanitized.sanitized, 'FAQ');
       await this.sessionService.saveAssistantMessage(session.id, faqHit, {
@@ -134,7 +171,13 @@ export class AIAssistantService {
     }
 
     // ── 5. Intent classification ─────────────────────────────────────────────
-    const intent = await this.intentClassifier.classify(sanitized.sanitized);
+    // Classifier chỉ thấy text — thêm hint khi có ảnh để câu hỏi ngắn kiểu
+    // "đây là gì?" không bị phân loại nhầm OFF_TOPIC.
+    const intent = await this.intentClassifier.classify(
+      hasImage
+        ? `${sanitized.sanitized} (người dùng đính kèm một hình ảnh nông sản)`
+        : sanitized.sanitized,
+    );
 
     if (intent === 'OFF_TOPIC') {
       await this.sessionService.saveUserMessage(session.id, sanitized.sanitized, 'OFF_TOPIC');
@@ -150,17 +193,31 @@ export class AIAssistantService {
     const systemPrompt = buildSystemPrompt(userContext);
     const historyMessages = this.sessionService.buildContextMessages(session);
 
+    // Có ảnh → user message thành multimodal chunks (text + inline image).
+    // GeminiProvider map image part về inlineData; GroqProvider flatten về text.
+    const userContent: LLMMessage['content'] = hasImage
+      ? [
+          { type: 'text', text: sanitized.sanitized },
+          { type: 'image', imageBase64: imageBase64!, mimeType: imageMime },
+        ]
+      : sanitized.sanitized;
+
     const messages: LLMConversationMessage[] = [
       { role: 'system', content: systemPrompt },
       ...historyMessages,
-      { role: 'user', content: sanitized.sanitized },
+      { role: 'user', content: userContent },
     ];
 
     const model = COMPLEX_INTENTS.includes(intent) ? REASONING_MODEL : FAST_MODEL;
     const useTools = TOOL_REQUIRED_INTENTS.includes(intent);
 
     // ── 7. Save user message before streaming ────────────────────────────────
-    await this.sessionService.saveUserMessage(session.id, sanitized.sanitized, intent);
+    // Ảnh không persist vào DB — chỉ đánh dấu để lịch sử hiển thị có ảnh kèm.
+    await this.sessionService.saveUserMessage(
+      session.id,
+      hasImage ? `${sanitized.sanitized} [📷 kèm ảnh]` : sanitized.sanitized,
+      intent,
+    );
 
     // ── 8. Return streaming generator ────────────────────────────────────────
     const toolCtx: ToolExecutionContext = { userId, sessionId: session.id };
@@ -169,6 +226,62 @@ export class AIAssistantService {
       : this.streamAndSave(session.id, messages, model, intent);
 
     return { sessionId: session.id, intent, stream };
+  }
+
+  /**
+   * Phân tích ảnh nông sản → gợi ý thông tin đăng bán (tên, danh mục, đơn vị, mô tả).
+   * Không bao giờ throw — mọi lỗi AI/parse đều trả về EMPTY_SUGGESTION để FE
+   * nhận HTTP 200 và tự fallback sang nhập tay.
+   */
+  async suggestProductFromImage(base64: string, mime: string): Promise<ProductSuggestion> {
+    if (!this.llm.completeWithImage) {
+      this.logger.warn('suggestProductFromImage: LLM provider has no vision support');
+      return { ...EMPTY_SUGGESTION };
+    }
+
+    // FE thường gửi nguyên data URI — strip prefix nếu có.
+    const imageBase64 = base64.replace(/^data:[^;]+;base64,/, '');
+
+    try {
+      const result = await this.llm.completeWithImage({
+        model: VISION_MODEL,
+        systemInstruction: SUGGEST_PRODUCT_PROMPT,
+        imageBase64,
+        mimeType: mime,
+        jsonOutput: true,
+        maxTokens: 800,
+        temperature: 0.2,
+      });
+
+      const parsed: unknown = JSON.parse(result.content);
+      return this.normalizeSuggestion(parsed);
+    } catch (err) {
+      this.logger.warn(`suggestProductFromImage failed: ${(err as Error).message}`);
+      return { ...EMPTY_SUGGESTION };
+    }
+  }
+
+  /** Coerce LLM output về đúng shape ProductSuggestion — field sai kiểu → null. */
+  private normalizeSuggestion(raw: unknown): ProductSuggestion {
+    if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+      return { ...EMPTY_SUGGESTION };
+    }
+    const obj = raw as Record<string, unknown>;
+    const str = (v: unknown): string | null =>
+      typeof v === 'string' && v.trim() ? v.trim() : null;
+
+    let confidence: number | null = null;
+    if (typeof obj.confidence === 'number' && Number.isFinite(obj.confidence)) {
+      confidence = Math.min(1, Math.max(0, obj.confidence));
+    }
+
+    return {
+      name: str(obj.name),
+      category_name: str(obj.category_name),
+      suggested_unit: str(obj.suggested_unit),
+      description: str(obj.description),
+      confidence,
+    };
   }
 
   /**
@@ -430,7 +543,7 @@ Câu trả lời chỉ gồm ĐÚNG 1 đoạn thông báo trên. Có thể kết
       const oldMessages = plainMessages.slice(1, -SLIDING_WINDOW_FOR_SUMMARY);
       if (oldMessages.length < 3) return;
 
-      const summaryContent = oldMessages.map((m) => `${m.role}: ${m.content}`).join('\n');
+      const summaryContent = oldMessages.map((m) => `${m.role}: ${textOfContent(m.content)}`).join('\n');
 
       const result = await this.llm.complete({
         model: FAST_MODEL,
@@ -553,7 +666,14 @@ function estimateMessagesTokens(messages: LLMConversationMessage[]): number {
   let chars = 0;
   for (const m of messages) {
     const c = (m as LLMMessage).content;
-    if (typeof c === 'string') chars += c.length;
+    if (typeof c === 'string') {
+      chars += c.length;
+    } else if (Array.isArray(c)) {
+      for (const part of c) {
+        // Ảnh inline ≈ 258 token với Gemini — quy về ~1000 chars theo heuristic /4
+        chars += part.type === 'text' ? part.text.length : 1000;
+      }
+    }
   }
   return Math.ceil(chars / 4);
 }

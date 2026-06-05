@@ -22,6 +22,9 @@ import { AIMode } from '@prisma/client';
 @WebSocketGateway({
   cors: { origin: '*' },
   namespace: '/ai-chat',
+  // socket.io mặc định giới hạn payload 1MB — quá nhỏ cho ảnh base64 trong
+  // ai:ask (vượt limit là server tự ngắt kết nối). 16MB khớp MaxLength của DTO.
+  maxHttpBufferSize: 16 * 1024 * 1024,
 })
 export class AIAssistantGateway implements OnGatewayConnection, OnGatewayDisconnect {
   @WebSocketServer()
@@ -103,7 +106,7 @@ export class AIAssistantGateway implements OnGatewayConnection, OnGatewayDisconn
    * Main event. Client asks a question.
    *
    * Event: ai:ask
-   * Payload: { content, sessionId?, mode, context? }
+   * Payload: { content, sessionId?, mode, context?, imageBase64?, imageMimeType? }
    *
    * Server emits (in order):
    *   ai:thinking       — immediately, shows typing indicator
@@ -118,7 +121,7 @@ export class AIAssistantGateway implements OnGatewayConnection, OnGatewayDisconn
   ) {
     const userId = this.requireAuth(client);
     this.logger.log(
-      `[AI-CHAT] ai:ask user=${userId} mode=${data?.mode} sessionId=${data?.sessionId ?? '∅'} content="${(data?.content ?? '').slice(0, 60)}"`,
+      `[AI-CHAT] ai:ask user=${userId} mode=${data?.mode} sessionId=${data?.sessionId ?? '∅'} image=${data?.imageBase64 ? 'yes' : 'no'} content="${(data?.content ?? '').slice(0, 60)}"`,
     );
 
     // Emit thinking immediately — user sees indicator before any LLM call

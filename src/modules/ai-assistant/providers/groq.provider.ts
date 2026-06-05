@@ -10,6 +10,7 @@ import {
   LLMConversationMessage,
   LLMStreamOptions,
   ToolCall,
+  textOfContent,
 } from './llm.interface';
 
 @Injectable()
@@ -116,8 +117,9 @@ export class GroqProvider implements ILLMProvider, OnModuleInit {
         } as ChatCompletionMessageParam;
       }
 
-      // Standard user / assistant / system message
-      return { role: msg.role, content: msg.content } as ChatCompletionMessageParam;
+      // Standard user / assistant / system message.
+      // Groq Llama text-only — multimodal content bị flatten về text, ảnh bỏ qua.
+      return { role: msg.role, content: textOfContent(msg.content) } as ChatCompletionMessageParam;
     });
   }
 }

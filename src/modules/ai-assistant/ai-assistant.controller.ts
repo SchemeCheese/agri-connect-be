@@ -13,9 +13,11 @@ import {
   Query,
 } from '@nestjs/common';
 import { JwtAuthGuard } from '../auth/decorators/guards/jwt-auth.guard';
+import { AIAssistantService } from './services/ai-assistant.service';
 import { SessionService } from './services/session.service';
 import { EmbeddingService } from './services/embedding.service';
 import { SemanticSearchService } from './services/semantic-search.service';
+import { SuggestProductDto } from './dtos/suggest-product.dto';
 
 interface AuthenticatedRequest {
   user: { sub: string; email?: string; is_buyer?: boolean; is_seller?: boolean; is_admin?: boolean };
@@ -25,10 +27,24 @@ interface AuthenticatedRequest {
 @UseGuards(JwtAuthGuard)
 export class AIAssistantController {
   constructor(
+    private readonly aiAssistantService: AIAssistantService,
     private readonly sessionService: SessionService,
     private readonly embeddingService: EmbeddingService,
     private readonly semanticSearch: SemanticSearchService,
   ) {}
+
+  /**
+   * Phân tích ảnh nông sản bằng Gemini vision → gợi ý thông tin đăng bán.
+   * Dùng cho form "Thêm sản phẩm" của seller: upload ảnh → tự điền tên,
+   * danh mục, đơn vị, mô tả.
+   *
+   * Luôn trả 200 — khi AI fail mọi field là null, FE fallback nhập tay.
+   */
+  @Post('suggest-product')
+  @HttpCode(HttpStatus.OK)
+  async suggestProduct(@Body() dto: SuggestProductDto) {
+    return this.aiAssistantService.suggestProductFromImage(dto.imageBase64, dto.mimeType);
+  }
 
   /** List the current user's AI sessions. */
   @Get('sessions')

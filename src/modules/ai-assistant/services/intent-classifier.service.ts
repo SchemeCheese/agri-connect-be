@@ -9,7 +9,7 @@ import type { ILLMProvider } from '../providers/llm.interface';
 import { InputSanitizer } from '../security/input-sanitizer';
 
 // Fast model — cheap, deterministic classification
-const CLASSIFIER_MODEL = 'llama-3.1-8b-instant';
+const CLASSIFIER_MODEL = 'gemini-2.5-flash-lite';
 
 // Keyword regex fast-path — bắt ~50-60% câu hỏi mà không cần gọi LLM (tiết kiệm 500-800ms)
 const FAST_PATH_PATTERNS: Array<{ pattern: RegExp; label: IntentLabel }> = [

@@ -29,13 +29,26 @@ async function bootstrap() {
 
   app.useStaticAssets(join(__dirname, '..', 'public'));
 
+  // Express mặc định giới hạn JSON body 100kb — quá nhỏ cho ảnh base64
+  // (POST /ai/suggest-product). 15mb ≈ ảnh 10MB sau khi encode base64.
+  app.useBodyParser('json', { limit: '15mb' });
+
   app.useGlobalPipes(new ValidationPipe({
     whitelist: true,
     forbidNonWhitelisted: true,
   }));
 
+  // Không bao giờ dùng origin:true khi credentials:true (cho phép mọi origin gửi
+  // cookie/Authorization = lỗ hổng bảo mật). Fallback: CORS_ORIGIN → FRONTEND_URL → false.
+  const corsOrigin: string[] | string | boolean =
+    corsOrigins && corsOrigins.length > 0
+      ? corsOrigins
+      : process.env.FRONTEND_URL
+        ? process.env.FRONTEND_URL.trim()
+        : false;
+
   app.enableCors({
-    origin: corsOrigins && corsOrigins.length > 0 ? corsOrigins : true,
+    origin: corsOrigin,
     methods: 'GET,HEAD,PUT,PATCH,POST,DELETE',
     credentials: true,
   });
@@ -45,7 +58,7 @@ async function bootstrap() {
   await app.listen(port, '0.0.0.0');
   console.log(`[Bootstrap] Server listening on port ${port}`);
   console.log(`[Bootstrap] NODE_ENV: ${nodeEnv}`);
-  console.log(`[Bootstrap] CORS origins: ${corsOrigins?.join(', ') ?? 'all (open)'}`);
+  console.log(`[Bootstrap] CORS origins: ${Array.isArray(corsOrigin) ? corsOrigin.join(', ') : corsOrigin === false ? 'none (disabled)' : corsOrigin}`);
   console.log(`[Bootstrap] DATABASE_URL: ${process.env.DATABASE_URL?.replace(/:([^:@]+)@/, ':***@') ?? 'NOT SET'}`);
 }
 
