@@ -275,6 +275,14 @@ export class GeminiProvider implements ILLMProvider, OnModuleInit {
       if (UNSUPPORTED_SCHEMA_KEYS.includes(key)) continue;
       result[key] = this.sanitizeSchema(value);
     }
+
+    // Gemini's proto Schema.enum chỉ nhận string[] — enum số (vd period_days:
+    // [7, 14, 30, 90]) bị reject 400 "Invalid value ... (TYPE_STRING), 7".
+    // Groq bỏ qua nên coerce tại đây, registry giữ nguyên kiểu gốc; tool
+    // executor không ảnh hưởng vì arg dùng trong phép trừ (tự coerce số).
+    if (Array.isArray(result.enum)) {
+      result.enum = result.enum.map(String);
+    }
     return result;
   }
 
