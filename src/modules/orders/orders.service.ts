@@ -14,7 +14,8 @@ import { PaymentsService } from '../payments/payments.service';
 import { ChatGateway } from '../chat/chat.gateway';
 import { CreateOrderDto } from './dtos/create-order.dto';
 import { CheckoutQuoteDto } from './dtos/checkout-quote.dto';
-import { OrderStatus, PaymentStatus, PaymentMethod, QuoteStatus, MessageType } from '@prisma/client';
+import { OrderStatus, PaymentStatus, PaymentMethod, PaymentType, QuoteStatus, MessageType } from '@prisma/client';
+import { QUOTE_EXPIRY_MS, QUOTE_EXPIRED_MESSAGE } from '../chat/negotiation.service';
 
 // Số ngày sau khi giao hàng buyer mới được phép báo sự cố (SHIPPING overdue window)
 const REPORT_ISSUE_DELAY_DAYS = 3;
@@ -40,7 +41,14 @@ type SellerMonthlyRevenueRow = {
 };
 
 type SellerDashboardSnapshot = {
+    /** Gross — giữ tên cũ để FE/mobile bản cũ không gãy (= grossRevenue). */
     totalRevenue: number;
+    /** Tổng doanh thu đơn COMPLETED (chưa trừ hoàn tiền). */
+    grossRevenue: number;
+    /** Tổng tiền đã hoàn cho buyer (Payment REFUND/REFUNDED). */
+    refundedAmount: number;
+    /** Thực nhận = grossRevenue − refundedAmount. */
+    netRevenue: number;
     totalOrders: number;
     activeProducts: number;
     revenueByMonth: { month: string; revenue: number }[];
@@ -82,6 +90,12 @@ export class OrdersService {
         }
         if (quote.quote_status !== QuoteStatus.PENDING) {
             throw new BadRequestException('Báo giá này đã được xử lý rồi.');
+        }
+        // Báo giá quá 24h → chặn checkout. Đây là đường accept THẬT của FE
+        // (NegotiationQuoteCard gọi /orders/checkout-quote, không qua respondToQuote)
+        // nên thiếu check ở đây thì expiry chỉ là hình thức.
+        if (Date.now() - quote.created_at.getTime() > QUOTE_EXPIRY_MS) {
+            throw new BadRequestException(QUOTE_EXPIRED_MESSAGE);
         }
 
         const conversation = quote.conversation;
@@ -204,8 +218,8 @@ export class OrdersService {
 
             return { sessionId: session.id, orderId: order.id };
         }, {
-            timeout: 15_000,
-            maxWait: 5_000,
+            timeout: 5_000,
+            maxWait: 2_000,
         });
 
         this.chatGateway.server.to(conversation.id).emit('quoteUpdated', {
@@ -446,10 +460,10 @@ export class OrdersService {
 
                 return { sessionId: session.id, results };
             }, {
-                // Railway proxy có latency ~100-300ms/query; checkout nhiều shop dễ vượt
-                // default 5s. 15s đủ rộng cho giỏ ~10 shop mà không che giấu deadlock thật.
-                timeout: 15_000,
-                maxWait: 5_000,
+                // Railway proxy có latency ~100-300ms/query. Giữ timeout chặt 5s + maxWait 2s
+                // để fail-fast khi row-lock bị giữ quá lâu thay vì treo request.
+                timeout: 5_000,
+                maxWait: 2_000,
             });
 
             const totalPaid = createdOrders.reduce((sum, o) => sum + o.final, 0);
@@ -1357,9 +1371,20 @@ export class OrdersService {
     // SUM(final_total_price) cho doanh thu — thay vì tải toàn bộ rows
     // về Node rồi reduce. Khi seller có hàng nghìn đơn, đây là khác biệt
     // lớn nhất về performance.
+    //
+    // Net revenue = gross (đơn COMPLETED) − tổng tiền ĐÃ hoàn cho buyer.
+    // Refund đếm qua bản ghi Payment (payment_type=REFUND, status=REFUNDED)
+    // thay vì Order.status — chính xác cả khi hoàn một phần / nhiều lần,
+    // và là "tiền ra" thực tế đã đối soát với MoMo.
     // =====================================================
-    async getSellerStats(sellerId: string): Promise<{ revenue: number; orderCount: number }> {
-        const [orderCount, revenueAgg] = await Promise.all([
+    async getSellerStats(sellerId: string): Promise<{
+        revenue: number;
+        grossRevenue: number;
+        refundedAmount: number;
+        netRevenue: number;
+        orderCount: number;
+    }> {
+        const [orderCount, revenueAgg, refundAgg] = await Promise.all([
             this.databaseService.order.count({
                 where: { seller_id: sellerId },
             }),
@@ -1367,10 +1392,24 @@ export class OrdersService {
                 where: { seller_id: sellerId, status: OrderStatus.COMPLETED },
                 _sum: { final_total_price: true },
             }),
+            this.databaseService.payment.aggregate({
+                where: {
+                    payment_type: PaymentType.REFUND,
+                    status: PaymentStatus.REFUNDED,
+                    order: { seller_id: sellerId },
+                },
+                _sum: { amount: true },
+            }),
         ]);
 
+        const grossRevenue = Number(revenueAgg._sum.final_total_price ?? 0);
+        const refundedAmount = Number(refundAgg._sum.amount ?? 0);
+
         return {
-            revenue: Number(revenueAgg._sum.final_total_price ?? 0),
+            revenue: grossRevenue, // alias cũ — caller hiện hữu không phải đổi
+            grossRevenue,
+            refundedAmount,
+            netRevenue: grossRevenue - refundedAmount,
             orderCount,
         };
     }
@@ -1612,7 +1651,10 @@ export class OrdersService {
         ].slice(0, 3);
 
         const snapshot: SellerDashboardSnapshot = {
-            totalRevenue: stats.revenue,
+            totalRevenue: stats.grossRevenue,
+            grossRevenue: stats.grossRevenue,
+            refundedAmount: stats.refundedAmount,
+            netRevenue: stats.netRevenue,
             totalOrders: stats.orderCount,
             activeProducts,
             revenueByMonth,

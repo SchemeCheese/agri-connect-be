@@ -38,7 +38,9 @@ export class AIAssistantController {
    * Dùng cho form "Thêm sản phẩm" của seller: upload ảnh → tự điền tên,
    * danh mục, đơn vị, mô tả.
    *
-   * Luôn trả 200 — khi AI fail mọi field là null, FE fallback nhập tay.
+   * Trả 200 khi AI fail (mọi field null, FE fallback nhập tay).
+   * Trả 400 khi ảnh bị Vision moderation chặn (NSFW / không phải nông sản) —
+   * message tiếng Việt trong body để FE hiển thị trực tiếp cho user.
    */
   @Post('suggest-product')
   @HttpCode(HttpStatus.OK)

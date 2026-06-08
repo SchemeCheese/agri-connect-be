@@ -143,7 +143,7 @@ export class AIAssistantGateway implements OnGatewayConnection, OnGatewayDisconn
           });
         } else if (typeof chunk === 'object' && chunk !== null && (chunk as any).__actionable_data__) {
           // Entity cards từ tool result — FE render product/shop card clickable
-          const evt = chunk as { type: 'products' | 'shops'; data: any[] };
+          const evt = chunk as { type: 'products' | 'shops' | 'orders'; data: any[] };
           this.emitActionableData(client.id, evt.type, evt.data, result.sessionId);
         } else {
           client.emit('ai:token', {
@@ -187,7 +187,7 @@ export class AIAssistantGateway implements OnGatewayConnection, OnGatewayDisconn
    */
   emitActionableData(
     clientId: string,
-    type: 'products' | 'shops',
+    type: 'products' | 'shops' | 'orders',
     data: any[],
     sessionId?: string,
   ) {

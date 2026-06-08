@@ -114,6 +114,12 @@ model User {
   provider       String?                     // 'password' | 'google'
   last_login_at  DateTime?                   // Updated on every successful auth
 
+  // ─── Refresh token rotation ──────────────────────────────────────────────
+  // bcrypt hash của SHA-256(refresh_token). Pre-hash bằng SHA-256 vì JWT dài hơn
+  // giới hạn 72 byte của bcrypt — nếu hash thẳng, các refresh token cùng user sẽ
+  // trùng 72 byte đầu (header + sub) và rotation mất tác dụng. null = đã logout.
+  refresh_token_hash String?
+
   is_active      Boolean   @default(true)
   created_at     DateTime  @default(now())
   updated_at     DateTime  @updatedAt

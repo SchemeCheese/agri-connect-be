@@ -4,6 +4,19 @@ import { ToolDefinition } from '../providers/llm.interface';
  * Canonical tool definitions sent to the LLM.
  * These define the structural domain boundary — the LLM can only act
  * through these tools, making off-topic behavior physically impossible.
+ *
+ * READ-ONLY INVARIANT (Acceptance Criterion 3 + security constraint):
+ * Every tool exposed here MUST be a pure READ operation (search/get/analyze/
+ * recommend). The assistant has NO write/update/delete capability by
+ * construction — no matter what a user prompts ("give me a 100% discount",
+ * "change the price", "grant a voucher"), the model cannot mutate prices,
+ * vouchers, stock, orders, or any DB state because no state-changing tool is
+ * ever registered or dispatchable (see ToolExecutorService default-deny).
+ *
+ * State-changing flows (placing orders, applying vouchers, accepting quotes)
+ * live behind their own authenticated REST endpoints with strict server-side
+ * validation — never behind a conversational AI tool. assertReadOnlyRegistry()
+ * below runs at module load so a future write tool can't slip in unreviewed.
  */
 export const AGRI_TOOLS: ToolDefinition[] = [
   {
@@ -184,3 +197,36 @@ export const AGRI_TOOLS: ToolDefinition[] = [
     },
   },
 ];
+
+/**
+ * Verb prefixes that imply a state-changing (write) operation. A conversational
+ * AI tool must never start with one of these — mutations belong on authenticated
+ * endpoints with secondary validation, not in a prompt-driven tool call.
+ */
+const FORBIDDEN_WRITE_VERBS = new Set<string>([
+  'create', 'add', 'insert', 'update', 'edit', 'set', 'modify', 'change',
+  'delete', 'remove', 'cancel', 'apply', 'grant', 'issue', 'place', 'send',
+  'pay', 'refund', 'approve', 'reject', 'confirm', 'assign', 'register',
+  'upsert', 'adjust', 'generate',
+]);
+
+/**
+ * Fail-fast at module load if a state-changing tool is ever added to AGRI_TOOLS.
+ * Keeps the read-only invariant a structural guarantee rather than a convention.
+ */
+function assertReadOnlyRegistry(tools: ToolDefinition[]): void {
+  for (const tool of tools) {
+    const verb = tool.function.name.split('_')[0]?.toLowerCase() ?? '';
+    if (FORBIDDEN_WRITE_VERBS.has(verb)) {
+      throw new Error(
+        `[ai-assistant] Refusing to register state-changing tool "${tool.function.name}". ` +
+          `The AI assistant is read-only by design — write operations must go through a ` +
+          `separate authenticated endpoint with strict secondary validation, never a ` +
+          `conversational tool. If this tool is genuinely read-only, rename it to start ` +
+          `with a read verb (search/get/list/analyze/recommend).`,
+      );
+    }
+  }
+}
+
+assertReadOnlyRegistry(AGRI_TOOLS);

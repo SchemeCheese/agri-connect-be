@@ -1,8 +1,8 @@
 import { Injectable, BadRequestException, UnauthorizedException, ServiceUnavailableException, Logger } from '@nestjs/common';
 import { DatabaseService } from '../../database/database.service';
-import { JwtService } from '@nestjs/jwt';
+import { JwtService, JwtSignOptions } from '@nestjs/jwt';
 import * as bcrypt from 'bcrypt';
-import { randomBytes } from 'crypto';
+import { randomBytes, createHash } from 'crypto';
 import { RegisterDto } from './dtos/register.dto';
 import { LoginDto } from './dtos/login.dto';
 import { FirebaseLoginDto } from './dtos/firebase-login.dto';
@@ -36,18 +36,19 @@ export class AuthService {
     initializeApp({ credential: cert({ projectId, clientEmail, privateKey }) });
   }
 
-  private buildAuthResponse(
+  private async buildAuthResponse(
     user: {
       id: string; email: string; full_name: string;
       is_buyer: boolean; is_seller: boolean; is_admin: boolean;
       avatar?: string | null;
     },
-    accessToken: string,
     avatar?: string | null,
   ) {
+    const { access_token, refresh_token } = await this.issueTokens(user);
     return {
       message: 'Đăng nhập thành công',
-      access_token: accessToken,
+      access_token,
+      refresh_token,
       user: {
         id: user.id,
         email: user.email,
@@ -62,6 +63,72 @@ export class AuthService {
 
   private buildJwtPayload(user: { id: string; email: string; is_buyer: boolean; is_seller: boolean; is_admin: boolean }) {
     return { sub: user.id, email: user.email, is_buyer: user.is_buyer, is_seller: user.is_seller, is_admin: user.is_admin };
+  }
+
+  // SHA-256 pre-hash để nén refresh token (dài) xuống 64 hex char trước khi bcrypt,
+  // tránh giới hạn 72 byte của bcrypt làm rotation mất tác dụng (xem schema.prisma).
+  private sha256(value: string) {
+    return createHash('sha256').update(value).digest('hex');
+  }
+
+  // Sinh cặp access (ngắn hạn) + refresh (dài hạn) và LƯU hash refresh vào DB.
+  // Gọi ở mọi điểm phát token (login / firebase / become-seller / refresh) → mỗi
+  // lần phát là một lần rotate: hash cũ bị ghi đè, refresh token cũ hết hiệu lực.
+  private async issueTokens(user: { id: string; email: string; is_buyer: boolean; is_seller: boolean; is_admin: boolean }) {
+    // expiresIn từ env là string thuần; SignOptions.expiresIn nay là
+    // `number | StringValue` (StringValue là template-literal type của `ms`),
+    // nên cast về đúng kiểu field — runtime vẫn nhận chuỗi '1h'/'7d' như cũ.
+    const access_token = await this.jwtService.signAsync(this.buildJwtPayload(user), {
+      expiresIn: (process.env.JWT_ACCESS_EXPIRES || '1h') as JwtSignOptions['expiresIn'],
+    });
+    const refresh_token = await this.jwtService.signAsync(
+      { sub: user.id, type: 'refresh' },
+      { expiresIn: (process.env.JWT_REFRESH_EXPIRES || '7d') as JwtSignOptions['expiresIn'] },
+    );
+
+    const refresh_token_hash = await bcrypt.hash(this.sha256(refresh_token), await bcrypt.genSalt());
+    await this.databaseService.user.update({
+      where: { id: user.id },
+      data: { refresh_token_hash },
+    });
+
+    return { access_token, refresh_token };
+  }
+
+  // --- REFRESH TOKEN ROTATION ---
+  // Verify chữ ký + hạn của refresh token, đối chiếu hash trong DB, rồi phát cặp
+  // token mới (rotate). Nếu hash không khớp → nghi ngờ token bị lộ/tái sử dụng:
+  // xoá hash để buộc đăng nhập lại.
+  async refreshToken(userId: string, refreshToken: string) {
+    let payload: { sub?: string; type?: string };
+    try {
+      payload = await this.jwtService.verifyAsync(refreshToken);
+    } catch {
+      throw new UnauthorizedException('Refresh token không hợp lệ hoặc đã hết hạn.');
+    }
+
+    if (payload.type !== 'refresh' || payload.sub !== userId) {
+      throw new UnauthorizedException('Refresh token không hợp lệ.');
+    }
+
+    const user = await this.databaseService.user.findUnique({ where: { id: userId } });
+    if (!user || !user.refresh_token_hash) {
+      throw new UnauthorizedException('Phiên đăng nhập không tồn tại. Vui lòng đăng nhập lại.');
+    }
+
+    const matches = await bcrypt.compare(this.sha256(refreshToken), user.refresh_token_hash);
+    if (!matches) {
+      // Refresh token đúng chữ ký nhưng không khớp hash hiện tại → có thể là token cũ
+      // đã bị rotate hoặc bị đánh cắp. Vô hiệu hoá phiên để an toàn.
+      await this.databaseService.user.update({
+        where: { id: userId },
+        data: { refresh_token_hash: null },
+      });
+      throw new UnauthorizedException('Refresh token không hợp lệ. Vui lòng đăng nhập lại.');
+    }
+
+    // issueTokens (gọi trong buildAuthResponse) sẽ ghi đè hash → rotate.
+    return this.buildAuthResponse(user, user.photo_url ?? undefined);
   }
 
   // --- 1. ĐĂNG KÝ ---
@@ -90,7 +157,39 @@ export class AuthService {
       if (existingUser.verified_email) {
         throw new BadRequestException('Email này đã được đăng ký và xác thực!');
       }
-      await this.databaseService.user.delete({ where: { email: dto.email } });
+
+      // User đã tồn tại nhưng CHƯA xác thực email: KHÔNG xoá User record (tránh
+      // huỷ dữ liệu liên quan / FK). Chỉ refresh mã OTP và gửi lại email.
+      if (!otpEnabled) {
+        // OTP tắt (dev): đánh dấu verified luôn để user dùng được.
+        await this.databaseService.user.update({
+          where: { id: existingUser.id },
+          data: { verified_email: true },
+        });
+        return { message: 'Tài khoản đã sẵn sàng (DEV: OTP tắt).', userId: existingUser.id, emailSent: false, autoVerified: true };
+      }
+
+      try {
+        const verification = await this.verificationService.createVerification(existingUser.id);
+        const ok = await this.emailService.sendVerificationOTP(existingUser.email, verification.code, existingUser.full_name);
+        if (!ok) throw new Error('EmailService returned false');
+
+        this.logger.log(`[REGISTER] Resent OTP for existing unverified user ${existingUser.email}`);
+        return { message: 'Tài khoản đã tồn tại nhưng chưa xác thực. Mã OTP mới đã được gửi lại.', userId: existingUser.id, emailSent: true };
+      } catch (err) {
+        this.logger.error(`[REGISTER] OTP resend failed for ${existingUser.email}: ${(err as Error)?.message}`);
+        const strictOtp = process.env.STRICT_OTP === 'true';
+        if (strictOtp) {
+          throw new ServiceUnavailableException('Không gửi được email OTP. Vui lòng liên hệ admin hoặc thử lại sau.');
+        }
+        await this.databaseService.user.update({ where: { id: existingUser.id }, data: { verified_email: true } });
+        return {
+          message: 'Đăng ký thành công. (OTP tạm bỏ qua — admin đang xử lý vấn đề email)',
+          userId: existingUser.id,
+          emailSent: false,
+          autoVerified: true,
+        };
+      }
     }
 
     const salt = await bcrypt.genSalt();
@@ -163,8 +262,7 @@ export class AuthService {
       data: { last_login_at: new Date() },
     }).catch((e) => this.logger.warn(`[LOGIN] last_login_at update failed: ${(e as Error).message}`));
 
-    const access_token = await this.jwtService.signAsync(this.buildJwtPayload(user));
-    return this.buildAuthResponse(user, access_token);
+    return this.buildAuthResponse(user);
   }
 
   // --- 3.5. NÂNG CẤP THÀNH SELLER ---
@@ -182,8 +280,7 @@ export class AuthService {
       user.is_seller = true;
     }
 
-    const access_token = await this.jwtService.signAsync(this.buildJwtPayload(user));
-    return this.buildAuthResponse(user, access_token);
+    return this.buildAuthResponse(user);
   }
 
   // --- 4. ĐĂNG NHẬP / ĐĂNG KÝ QUA FIREBASE (GOOGLE / EMAIL-PASSWORD-VIA-FIREBASE) ---
@@ -259,7 +356,6 @@ export class AuthService {
       });
     }
 
-    const access_token = await this.jwtService.signAsync(this.buildJwtPayload(user));
-    return this.buildAuthResponse(user, access_token, firebasePhoto || user.photo_url || undefined);
+    return this.buildAuthResponse(user, firebasePhoto || user.photo_url || undefined);
   }
 }

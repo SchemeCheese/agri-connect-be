@@ -3,6 +3,7 @@ import { AuthService } from './auth.service';
 import { RegisterDto } from './dtos/register.dto';
 import { LoginDto } from './dtos/login.dto';
 import { FirebaseLoginDto } from './dtos/firebase-login.dto';
+import { RefreshTokenDto } from './dtos/refresh-token.dto';
 import { JwtAuthGuard } from './decorators/guards/jwt-auth.guard';
 
 @Controller('auth')
@@ -22,6 +23,16 @@ export class AuthController {
   @Post('firebase')
   firebaseLogin(@Body() dto: FirebaseLoginDto) {
     return this.authService.loginWithFirebase(dto);
+  }
+
+  /**
+   * POST /auth/refresh
+   * Rotation: nhận { userId, refresh_token }, verify + đối chiếu hash trong DB,
+   * trả về cặp access_token + refresh_token mới (refresh token cũ bị vô hiệu hoá).
+   */
+  @Post('refresh')
+  refresh(@Body() dto: RefreshTokenDto) {
+    return this.authService.refreshToken(dto.userId, dto.refresh_token);
   }
 
   /**

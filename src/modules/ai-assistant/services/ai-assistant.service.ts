@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { AIMode, Prisma } from '@prisma/client';
 import { DatabaseService } from '../../../database/database.service';
@@ -15,7 +15,7 @@ import type {
   LLMToolResultMessage,
 } from '../providers/llm.interface';
 import { textOfContent } from '../providers/llm.interface';
-import { GeminiProvider } from '../providers/gemini.provider';
+import { GeminiProvider, GEMINI_MODELS } from '../providers/gemini.provider';
 import { GroqProvider } from '../providers/groq.provider';
 import { buildSystemPrompt, SystemPromptContext } from '../prompts/system.prompt';
 import { BUYER_FAQ_CACHE } from '../prompts/buyer.prompt';
@@ -25,6 +25,7 @@ import { OutputValidator } from '../security/output-validator';
 import { IntentClassifierService } from './intent-classifier.service';
 import { SessionService } from './session.service';
 import { RateLimitService } from './rate-limit.service';
+import { VisionModerationService } from './vision-moderation.service';
 import { IntentLabel } from '../prompts/intent-classifier.prompt';
 import { ToolExecutorService } from '../tools/tool-executor.service';
 import { AGRI_TOOLS } from '../tools/tool-registry';
@@ -32,11 +33,13 @@ import type { ProductSummary } from '../tools/product-search.tool';
 import type { SellerScore } from '../tools/seller-recommendation.tool';
 import { TOOL_WHITELIST, ToolExecutionContext, ToolName, MAX_TOOL_ROUNDS } from '../tools/types';
 
-const REASONING_MODEL = 'gemini-2.5-flash';
-const FAST_MODEL = 'gemini-2.5-flash-lite';
-// Vision model cho phân tích ảnh sản phẩm. Spec gốc yêu cầu gemini-1.5-flash
-// nhưng Google đã retire model đó (09/2025) — 2.5-flash là bản thay thế chính thức.
-const VISION_MODEL = 'gemini-2.5-flash';
+// Model routing — single source of truth lives in gemini.provider.ts (GEMINI_MODELS).
+// General chat sessions → flash / flash-lite; image vision & moderation → pro (Criterion 1).
+const REASONING_MODEL = GEMINI_MODELS.CHAT; // gemini-2.5-flash — general chat (incl. chat-with-image)
+const FAST_MODEL = GEMINI_MODELS.CHAT_LITE; // gemini-2.5-flash-lite — light chat / tool detection
+// gemini-2.5-pro — STRICTLY for dedicated image vision/moderation analysis
+// (product-photo classification), never for ordinary conversational turns.
+const VISION_MODEL = GEMINI_MODELS.VISION;
 
 // Model Groq tương đương khi fallback (Gemini rate limit / 5xx). Model id của
 // Gemini không tồn tại trên Groq nên bắt buộc phải remap. Llama 3.x trên Groq
@@ -82,6 +85,13 @@ const OFF_TOPIC_RESPONSE =
 
 const INJECTION_RESPONSE =
   'Yêu cầu của bạn không thể được xử lý. Tôi chỉ hỗ trợ các nghiệp vụ giao dịch nông sản.';
+
+// Thông báo khi ảnh bị Vision moderation chặn — chạy TRƯỚC Gemini để vừa an
+// toàn vừa không tốn token cho ảnh rác (selfie, screenshot, NSFW...).
+const UNSAFE_IMAGE_RESPONSE =
+  'Hình ảnh có chứa nội dung nhạy cảm. Vui lòng chọn ảnh khác.';
+const NON_AGRI_IMAGE_RESPONSE =
+  'Hình ảnh này có vẻ không phải là nông sản. Vui lòng thử lại với ảnh khác.';
 
 export interface AskResult {
   sessionId: string;
@@ -169,6 +179,7 @@ export class AIAssistantService {
     private readonly sessionService: SessionService,
     private readonly rateLimitService: RateLimitService,
     private readonly toolExecutor: ToolExecutorService,
+    private readonly visionModeration: VisionModerationService,
   ) {}
 
   // ─── LLM orchestration: Gemini-first, Groq fallback ─────────────────────────
@@ -260,6 +271,25 @@ export class AIAssistantService {
       dto.imageMimeType ?? dto.imageBase64?.match(/^data:([^;]+);base64,/)?.[1] ?? 'image/jpeg';
     const hasImage = !!imageBase64;
 
+    // ── 2c. Image moderation (Google Vision) — TRƯỚC mọi call Gemini ────────
+    // Chặn NSFW + ảnh không phải nông sản ngay tại đây: vừa an toàn vừa khỏi
+    // tốn token Gemini cho ảnh rác. Trả lời tĩnh như các nhánh block khác
+    // (rate limit / injection) thay vì throw — user thấy tin nhắn thân thiện
+    // trong khung chat, không phải error toast.
+    if (hasImage) {
+      const moderation = await this.visionModeration.moderateImage(imageBase64!);
+      if (!moderation.isSafe || !moderation.isAgriculture) {
+        this.logger.warn(
+          `Image blocked by moderation (user=${userId}): ${moderation.reason ?? 'unknown'}`,
+        );
+        return this.staticResponse(
+          '',
+          'OFF_TOPIC',
+          moderation.isSafe ? NON_AGRI_IMAGE_RESPONSE : UNSAFE_IMAGE_RESPONSE,
+        );
+      }
+    }
+
     // ── 3. Session ───────────────────────────────────────────────────────────
     const session = await this.sessionService.getOrCreate(
       userId,
@@ -342,19 +372,32 @@ export class AIAssistantService {
 
   /**
    * Phân tích ảnh nông sản → gợi ý thông tin đăng bán (tên, danh mục, đơn vị, mô tả).
-   * Không bao giờ throw — mọi lỗi AI/parse đều trả về EMPTY_SUGGESTION để FE
-   * nhận HTTP 200 và tự fallback sang nhập tay.
+   * Lỗi AI/parse trả về EMPTY_SUGGESTION để FE nhận HTTP 200 và fallback nhập tay.
+   * NGOẠI LỆ: ảnh bị Vision moderation chặn (NSFW / không phải nông sản) →
+   * throw BadRequestException 400 với message tiếng Việt — đây là lỗi của INPUT
+   * chứ không phải lỗi hệ thống, FE phải báo user đổi ảnh thay vì nhập tay.
    */
   async suggestProductFromImage(base64: string, mime: string): Promise<ProductSuggestion> {
+    // FE thường gửi nguyên data URI — strip prefix nếu có.
+    const imageBase64 = base64.replace(/^data:[^;]+;base64,/, '');
+
+    // Moderation chạy TRƯỚC Gemini — chặn sớm để không tốn token vision.
+    const moderation = await this.visionModeration.moderateImage(imageBase64);
+    if (!moderation.isSafe) {
+      this.logger.warn(`suggestProductFromImage blocked: ${moderation.reason}`);
+      throw new BadRequestException(UNSAFE_IMAGE_RESPONSE);
+    }
+    if (!moderation.isAgriculture) {
+      this.logger.warn(`suggestProductFromImage blocked: ${moderation.reason}`);
+      throw new BadRequestException(NON_AGRI_IMAGE_RESPONSE);
+    }
+
     // Vision đi thẳng Gemini — Groq text-only nên không có fallback cho ảnh;
     // lỗi rơi xuống catch dưới → EMPTY_SUGGESTION, FE fallback nhập tay.
     if (!this.gemini.completeWithImage) {
       this.logger.warn('suggestProductFromImage: LLM provider has no vision support');
       return { ...EMPTY_SUGGESTION };
     }
-
-    // FE thường gửi nguyên data URI — strip prefix nếu có.
-    const imageBase64 = base64.replace(/^data:[^;]+;base64,/, '');
 
     try {
       const result = await this.gemini.completeWithImage({
@@ -363,7 +406,9 @@ export class AIAssistantService {
         imageBase64,
         mimeType: mime,
         jsonOutput: true,
-        maxTokens: 800,
+        // gemini-2.5-pro is a thinking model — give thinking + JSON output room
+        // (800 risked starving the answer to empty).
+        maxTokens: 2048,
         temperature: 0.2,
       });
 
@@ -442,7 +487,11 @@ export class AIAssistantService {
             // Strip ảnh khỏi history — chỉ user message cuối được giữ image part
             messages: this.sanitizeHistoryImages(workingMessages),
             tools: AGRI_TOOLS,
-            maxTokens: 256,
+            // Image path dùng 2.5-flash (thinking model) — thought tokens tính
+            // vào maxOutputTokens, 256 dễ bị thinking nuốt sạch → response rỗng,
+            // loop break round 0 và user nhận "chưa có sản phẩm" oan. Text path
+            // dùng flash-lite (thinking off mặc định) nên 256 vẫn đủ.
+            maxTokens: hasImage ? 1024 : 256,
             temperature: 0.1,
           },
           hasImage,
@@ -512,11 +561,16 @@ export class AIAssistantService {
     }
 
     // ── Grounding selection ──────────────────────────────────────────────
-    // Three cases, in priority order:
+    // Four cases, in priority order:
     //   (a) Knowledge tool ran → tool body is the source of truth (no entity list).
     //   (b) Retrieval tools returned entities → whitelist them by name.
-    //   (c) Tools ran but returned nothing → forced no-data response.
+    //   (c) Retrieval tool RAN but returned [] → no-data response.
+    //   (d) NO tool ran (Gemini lỗi / model không gọi tool / whitelist chặn)
+    //       → KHÔNG được khẳng định "chưa có sản phẩm" — bot chưa hề tra cứu.
+    //       Trước đây (c) và (d) gộp chung → user bị trả lời sai "hệ thống
+    //       chưa có mặt hàng" dù tool chưa chạy.
     const hadKnowledgeTool = toolsCalled.some((n) => KNOWLEDGE_TOOLS.has(n));
+    const hadRetrievalTool = toolsCalled.some((n) => !KNOWLEDGE_TOOLS.has(n));
 
     const groundingContent = hadKnowledgeTool
       ? `[GROUNDING — KNOWLEDGE BASE]
@@ -540,32 +594,42 @@ TUYỆT ĐỐI KHÔNG:
 
 Nếu user hỏi về thứ KHÔNG có trong danh sách → trả lời:
 "Hệ thống chưa có dữ liệu phù hợp. Bạn có thể thử từ khóa khác hoặc xem trực tiếp tại mục Cửa hàng."`
-        : `[GROUNDING — NO DATA]
-Tool đã chạy và trả về RỖNG. Hệ thống KHÔNG có sản phẩm/cửa hàng nào khớp với yêu cầu của user.
+        : hadRetrievalTool
+          ? `[GROUNDING — KẾT QUẢ RỖNG]
+Tool đã chạy và KHÔNG tìm thấy sản phẩm/cửa hàng nào khớp trong hệ thống.
+Hãy trả lời TỰ NHIÊN (quy tắc "KHI KHÔNG ĐỦ DỮ LIỆU" KHÔNG áp dụng cho lượt này):
+1. Nếu user đính kèm ảnh: nói rõ trong ảnh là gì (vd "Đây là quả mận hậu").
+2. Thông báo hệ thống hiện CHƯA có mặt hàng/cửa hàng phù hợp với yêu cầu.
+3. Gợi ý 1 hành động tiếp theo (thử từ khóa khác / xem mục Cửa hàng / Sản phẩm).
 
-BẮT BUỘC: Trả lời CHÍNH XÁC theo mẫu dưới đây, KHÔNG thêm bất kỳ thông tin nào khác:
+Trả lời dạng đoạn văn ngắn, KHÔNG dùng danh sách gạch đầu dòng.
 
-"Hiện tại trên hệ thống chưa có sản phẩm/cửa hàng phù hợp với yêu cầu của bạn. Bạn có thể thử lại với từ khóa khác, hoặc xem danh sách hiện có tại mục Cửa hàng/Sản phẩm trên Agri-Connect."
+VẪN TUYỆT ĐỐI CẤM (anti-hallucination):
+- Bịa tên shop/sản phẩm/seller nghe như có thật trên sàn
+- Nêu giá, tồn kho, đánh giá sao, địa chỉ, số điện thoại, link, mã giảm giá
+- Lấp chỗ trống bằng "giá thị trường khoảng...", "thường thì...", kiến thức bên ngoài`
+          : `[GROUNDING — CHƯA TRA CỨU ĐƯỢC]
+Lượt này KHÔNG có dữ liệu tool nào (công cụ tra cứu chưa chạy được).
+Bạn CHƯA tra cứu hệ thống → TUYỆT ĐỐI KHÔNG khẳng định "hệ thống chưa có sản phẩm/cửa hàng"
+hay "không tìm thấy" — bạn không biết điều đó.
 
-TUYỆT ĐỐI CẤM (vi phạm = output bị chặn 100%):
-- Nêu BẤT KỲ con số giá nào (vd: "30.000đ/kg", "khoảng 25k", "giá thị trường ~20k") — KHÔNG CÓ DATA = KHÔNG CÓ GIÁ
-- Nêu BẤT KỲ số lượng tồn kho nào (vd: "còn 200kg", "khoảng 50 phần") — KHÔNG CÓ DATA = KHÔNG CÓ STOCK
-- Nêu BẤT KỲ tên cửa hàng / shop / seller / vựa / nông trại / hợp tác xã nào (vd: "Vựa Gạo Miền Tây", "Nông trại ABC") — KHÔNG CÓ DATA = KHÔNG CÓ TÊN
-- Nêu BẤT KỲ tên sản phẩm cụ thể nào (vd: "cam sành Hà Giang", "gạo ST25") ngoài từ khóa user vừa hỏi
-- Nêu địa chỉ, số điện thoại, link, mã giảm giá, đánh giá sao
-- Dùng các cụm "thường thì...", "giá thị trường khoảng...", "có thể bạn quan tâm đến...", "ngoài ra còn có..."
-- Dùng kiến thức chung về nông sản / kinh nghiệm cá nhân để lấp chỗ trống
-- Đề xuất shop/sản phẩm thay thế bằng phỏng đoán
+Hãy trả lời tự nhiên, ngắn gọn theo ngữ cảnh hội thoại. Nếu user cần dữ liệu cụ thể
+(sản phẩm / giá / cửa hàng), nói rằng bạn chưa tra cứu được ngay lúc này và mời họ
+hỏi lại hoặc xem trực tiếp mục Sản phẩm / Cửa hàng.
 
-Câu trả lời chỉ gồm ĐÚNG 1 đoạn thông báo trên. Có thể kết bằng 1 câu hỏi gợi mở ngắn (vd: "Bạn muốn tôi tìm theo loại khác không?") nhưng KHÔNG được kèm bất kỳ tên/giá/số liệu nào.`;
+VẪN TUYỆT ĐỐI CẤM (anti-hallucination):
+- Bịa tên shop/sản phẩm/seller, giá, tồn kho, đánh giá, địa chỉ, số điện thoại, link, mã giảm giá
+- Trả lời bằng kiến thức thị trường bên ngoài Agri-Connect`;
 
     workingMessages.push({ role: 'system', content: groundingContent });
 
     // Knowledge-tool answers shouldn't run the entity-whitelist validator —
     // pass undefined so OutputValidator falls into knowledge mode (PII / leak
-    // / price guards still run unconditionally).
+    // / price guards still run unconditionally). Tương tự khi KHÔNG tool nào
+    // chạy: validEntities rỗng không có nghĩa "tool trả rỗng" — bullet check
+    // của validator sẽ thay nhầm câu trả lời hợp lệ bằng SAFE_FALLBACK.
     yield* this.streamAndSave(sessionId, workingMessages, model, intent, toolsCalled, {
-      validEntities: hadKnowledgeTool ? undefined : validEntities,
+      validEntities: hadKnowledgeTool || !hadRetrievalTool ? undefined : validEntities,
       toolItemCount: totalToolItems,
     });
   }

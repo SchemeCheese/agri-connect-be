@@ -24,6 +24,31 @@ import {
 /** JSON-Schema keys Gemini's Schema type does not accept — stripped recursively. */
 const UNSUPPORTED_SCHEMA_KEYS = ['additionalProperties', '$schema', 'default', 'exclusiveMinimum', 'exclusiveMaximum'];
 
+/**
+ * Centralized Gemini model routing — single source of truth (Acceptance Criterion 1).
+ *
+ * - CHAT / CHAT_LITE → gemini-2.5-flash(-lite): general conversational chat,
+ *   tool detection, summarization. Low latency / low cost, both multimodal.
+ * - VISION → gemini-2.5-pro: used STRICTLY for image vision / moderation
+ *   analysis (e.g. classifying an uploaded product photo for listing
+ *   suggestions). Highest-capability tier; NOT used for ordinary chat turns
+ *   that merely happen to include an image — those stay on CHAT to avoid the
+ *   thinking-token latency/cost of pro on every conversational reply.
+ *
+ * Callers should resolve a task → model via GeminiProvider.resolveModel() (or
+ * import GEMINI_MODELS) so routing never drifts between the service and provider.
+ */
+export const GEMINI_MODELS = {
+  /** General chat (reasoning) — multimodal-capable, fast. */
+  CHAT: 'gemini-2.5-flash',
+  /** Lightweight chat / tool-detection / summarization — cheapest. */
+  CHAT_LITE: 'gemini-2.5-flash-lite',
+  /** Image vision + moderation analysis ONLY — most capable tier. */
+  VISION: 'gemini-2.5-pro',
+} as const;
+
+export type GeminiTask = 'chat' | 'chat_lite' | 'vision';
+
 @Injectable()
 export class GeminiProvider implements ILLMProvider, OnModuleInit {
   private readonly logger = new Logger(GeminiProvider.name);
@@ -32,6 +57,23 @@ export class GeminiProvider implements ILLMProvider, OnModuleInit {
   private callSeq = 0;
 
   constructor(private readonly config: ConfigService) {}
+
+  /**
+   * Resolve a task category to its routed Gemini model. Single entry point so
+   * model selection stays consistent across every caller (Criterion 1):
+   * vision/moderation → gemini-2.5-pro, everything else → flash/flash-lite.
+   */
+  static resolveModel(task: GeminiTask): string {
+    switch (task) {
+      case 'vision':
+        return GEMINI_MODELS.VISION;
+      case 'chat_lite':
+        return GEMINI_MODELS.CHAT_LITE;
+      case 'chat':
+      default:
+        return GEMINI_MODELS.CHAT;
+    }
+  }
 
   onModuleInit() {
     const apiKey = this.config.get<string>('GEMINI_API_KEY');
@@ -90,11 +132,17 @@ export class GeminiProvider implements ILLMProvider, OnModuleInit {
   }
 
   async completeWithImage(options: LLMImageCompleteOptions): Promise<LLMCompleteResult> {
+    // Vision/moderation is routed to gemini-2.5-pro (Criterion 1); default here
+    // so any caller that omits a model still lands on the correct tier.
+    const resolvedModel = options.model || GEMINI_MODELS.VISION;
     const model = this.client.getGenerativeModel({
-      model: options.model,
+      model: resolvedModel,
       systemInstruction: options.systemInstruction,
       generationConfig: {
-        maxOutputTokens: options.maxTokens ?? 800,
+        // gemini-2.5-pro is a thinking model — thinking tokens count toward
+        // maxOutputTokens, so reserve a generous budget (raised from 800) or
+        // the JSON answer can be starved to an empty response.
+        maxOutputTokens: options.maxTokens ?? 2048,
         temperature: options.temperature ?? 0.2,
         // Forces the model to emit syntactically valid JSON (no markdown fences).
         ...(options.jsonOutput ? { responseMimeType: 'application/json' } : {}),
@@ -116,7 +164,7 @@ export class GeminiProvider implements ILLMProvider, OnModuleInit {
     return {
       content: this.safeText(result),
       tokensUsed: result.response.usageMetadata?.totalTokenCount ?? 0,
-      model: options.model,
+      model: resolvedModel,
     };
   }
 

@@ -7,8 +7,9 @@ const MAX_INPUT_LENGTH = 500;
  * Regex-based so zero LLM cost — runs before any API call.
  */
 const INJECTION_PATTERNS: RegExp[] = [
-  /ignore\s+(previous|all|above|prior)\s+instructions?/i,
-  /bỏ\s*qua\s*(các\s*)?(quy\s*tắc|hướng\s*dẫn|lệnh)/i,
+  // "ignore all instructions", "disregard the rules", "forget previous prompts"...
+  /(ignore|disregard|forget|override|bypass)\s+(previous|all|above|prior|the|any|these)\s+(instructions?|rules?|guidelines?|prompts?|constraints?)/i,
+  /bỏ\s*qua\s*(các\s*)?(quy\s*tắc|hướng\s*dẫn|lệnh|chỉ\s*thị|ràng\s*buộc)/i,
   /act\s+as\s+(a\s+)?(?!buyer|seller)/i,  // "act as" non-role entities
   /pretend\s+(you\s+are|to\s+be)/i,
   /giả\s*vờ\s*(bạn\s*là|là)/i,

@@ -34,6 +34,14 @@ export interface StartNegotiationResult {
   };
 }
 
+// Báo giá chỉ có hiệu lực 24h kể từ lúc seller gửi. Check stateless theo
+// created_at (Prisma QuoteStatus KHÔNG có EXPIRED — tránh migration); FE tự
+// tính cùng công thức để disable nút Accept + hiển thị badge "Hết hạn".
+// Export để orders.service (checkout-quote — đường accept thật của FE) dùng chung.
+export const QUOTE_EXPIRY_MS = 24 * 60 * 60 * 1000;
+
+export const QUOTE_EXPIRED_MESSAGE = 'Báo giá đã hết hạn';
+
 export interface SendQuoteDto {
   conversationId: string;
   productId: string;
@@ -288,6 +296,16 @@ export class NegotiationService {
     // Người gửi quote là seller — buyer không phải sender
     if (msg.sender_id === buyerId) {
       throw new ForbiddenException('Người bán mới có thể gửi báo giá.');
+    }
+
+    // Quá 24h → không cho ACCEPT (giá cũ có thể đã lệch thị trường).
+    // REJECTED vẫn cho phép: từ chối báo giá hết hạn là vô hại và giúp
+    // buyer dọn card khỏi trạng thái chờ (FE cũng chỉ disable nút Accept).
+    if (
+      action === 'ACCEPTED' &&
+      Date.now() - msg.created_at.getTime() > QUOTE_EXPIRY_MS
+    ) {
+      throw new BadRequestException(QUOTE_EXPIRED_MESSAGE);
     }
 
     const updated = await this.db.chatMessage.update({

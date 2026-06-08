@@ -351,6 +351,9 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
         price: message.quote_price ? Number(message.quote_price) : null,
         unit: message.quote_unit,
         status: message.quote_status,
+        // FE tính hết hạn 24h từ mốc này (extractQuote fallback msg.created_at
+        // cho message load từ REST — gửi kèm ở đây để socket path đồng nhất)
+        createdAt: message.created_at,
       },
       created_at: message.created_at,
     });

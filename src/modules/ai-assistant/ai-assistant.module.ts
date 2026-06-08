@@ -7,6 +7,7 @@ import { AIAssistantService } from './services/ai-assistant.service';
 import { IntentClassifierService } from './services/intent-classifier.service';
 import { SessionService } from './services/session.service';
 import { RateLimitService } from './services/rate-limit.service';
+import { VisionModerationService } from './services/vision-moderation.service';
 import { EmbeddingService } from './services/embedding.service';
 import { SemanticSearchService } from './services/semantic-search.service';
 import { GeminiProvider } from './providers/gemini.provider';
@@ -51,6 +52,9 @@ import { ToolExecutorService } from './tools/tool-executor.service';
     RateLimitService,
     SessionService,
     IntentClassifierService,
+
+    // Image moderation (Google Cloud Vision) — gác cổng NSFW / non-agri trước Gemini
+    VisionModerationService,
 
     // Phase 3: Semantic search pipeline
     // Dependency order: EmbeddingService → SemanticSearchService → ProductSearchTool
