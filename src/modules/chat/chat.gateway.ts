@@ -27,6 +27,10 @@ import { CancelNegotiationDto } from './dtos/cancel-negotiation.dto';
 @WebSocketGateway({
   cors: { origin: '*' },
   namespace: '/chat',
+  // Ảnh chat đi qua REST (/chat/upload-image) rồi chỉ phát URL qua socket nên
+  // payload bình thường rất nhỏ. Nâng buffer 1MB→10MB cho đồng nhất với
+  // /ai-chat và phòng trường hợp payload lớn bất ngờ tự ngắt kết nối.
+  maxHttpBufferSize: 10 * 1024 * 1024,
 })
 export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
   @WebSocketServer()
