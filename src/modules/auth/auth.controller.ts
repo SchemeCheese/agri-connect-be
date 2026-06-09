@@ -4,6 +4,7 @@ import { RegisterDto } from './dtos/register.dto';
 import { LoginDto } from './dtos/login.dto';
 import { FirebaseLoginDto } from './dtos/firebase-login.dto';
 import { RefreshTokenDto } from './dtos/refresh-token.dto';
+import { SelectRoleDto, SwitchRoleDto } from './dtos/select-role.dto';
 import { JwtAuthGuard } from './decorators/guards/jwt-auth.guard';
 
 @Controller('auth')
@@ -63,5 +64,27 @@ export class AuthController {
   @Post('become-seller')
   becomeSeller(@Request() req) {
     return this.authService.becomeSeller(req.user.sub);
+  }
+
+  /**
+   * POST /auth/select-role
+   * Bước 2 của login khi user sở hữu cả BUYER lẫn SELLER: gửi { tempToken, role }.
+   * BE verify tempToken (purpose=role_selection) + đối chiếu DB rồi phát token đầy
+   * đủ với activeRole đã chọn. Public — tempToken tự nó là bằng chứng xác thực.
+   */
+  @Post('select-role')
+  selectRole(@Body() dto: SelectRoleDto) {
+    return this.authService.selectRole(dto.tempToken, dto.role);
+  }
+
+  /**
+   * POST /auth/switch-role
+   * Đổi workspace khi đang đăng nhập (nút "Đổi vai trò"). Yêu cầu access token hợp
+   * lệ; BE kiểm tra user thực sự sở hữu vai trò mới trước khi phát token mới.
+   */
+  @UseGuards(JwtAuthGuard)
+  @Post('switch-role')
+  switchRole(@Request() req, @Body() dto: SwitchRoleDto) {
+    return this.authService.switchRole(req.user.sub, dto.role);
   }
 }

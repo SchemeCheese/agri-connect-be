@@ -37,13 +37,28 @@ export class GoogleAuthService {
     };
   }
 
-  private buildJwtPayload(user: { id: string; email: string; is_buyer: boolean; is_seller: boolean; is_admin: boolean }) {
+  private allowedRoles(user: { is_buyer: boolean; is_seller: boolean; is_admin: boolean }): ('BUYER' | 'SELLER' | 'ADMIN')[] {
+    const roles: ('BUYER' | 'SELLER' | 'ADMIN')[] = [];
+    if (user.is_buyer) roles.push('BUYER');
+    if (user.is_seller) roles.push('SELLER');
+    if (user.is_admin) roles.push('ADMIN');
+    if (roles.length === 0) roles.push('BUYER');
+    return roles;
+  }
+
+  // activeRole bắt buộc có mặt trong token — RolesGuard chỉ tin field này.
+  private buildJwtPayload(
+    user: { id: string; email: string; is_buyer: boolean; is_seller: boolean; is_admin: boolean },
+    activeRole: 'BUYER' | 'SELLER' | 'ADMIN',
+  ) {
     return {
       sub: user.id,
       email: user.email,
       is_buyer: user.is_buyer,
       is_seller: user.is_seller,
       is_admin: user.is_admin,
+      allowedRoles: this.allowedRoles(user),
+      activeRole,
     };
   }
 
@@ -172,7 +187,9 @@ export class GoogleAuthService {
         );
       }
 
-      const access_token = await this.jwtService.signAsync(this.buildJwtPayload(user));
+      const access_token = await this.jwtService.signAsync(
+        this.buildJwtPayload(user, selectedRole as unknown as 'BUYER' | 'SELLER'),
+      );
       return this.buildAuthResponse(user, access_token);
     }
 
@@ -185,7 +202,8 @@ export class GoogleAuthService {
       throw new HttpException({ message: 'Cần chọn vai trò để đăng nhập', roles }, 300);
     }
 
-    const access_token = await this.jwtService.signAsync(this.buildJwtPayload(user));
+    const activeRole = user.is_admin ? 'ADMIN' : user.is_seller ? 'SELLER' : 'BUYER';
+    const access_token = await this.jwtService.signAsync(this.buildJwtPayload(user, activeRole));
     return this.buildAuthResponse(user, access_token);
   }
 

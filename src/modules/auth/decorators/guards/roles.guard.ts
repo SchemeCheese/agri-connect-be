@@ -16,15 +16,25 @@ export class RolesGuard implements CanActivate {
 
     const { user } = context.switchToHttp().getRequest();
 
-    const hasRole = requiredRoles.some((role) => {
-      if (role === UserRole.BUYER)  return user?.is_buyer;
-      if (role === UserRole.SELLER) return user?.is_seller;
-      if (role === UserRole.ADMIN)  return user?.is_admin;
-      return false;
-    });
+    // ─── Active-Role enforcement ──────────────────────────────────────────────
+    // Guard CHỈ tin `activeRole` đã ký trong JWT, KHÔNG tin các flag is_seller/
+    // is_buyer trong DB. Nhờ vậy một user sở hữu cả 2 vai trò nhưng đang ở
+    // workspace BUYER sẽ bị 403 khi gọi route SELLER (và ngược lại) — đúng yêu cầu
+    // tách workspace, và FE không thể "giả" quyền vì activeRole do BE phát ra.
+    const activeRole = user?.activeRole as UserRole | null | undefined;
 
-    if (!hasRole) {
-      throw new ForbiddenException('Bạn không có quyền thực hiện hành động này!');
+    if (!activeRole) {
+      // Token cũ (legacy, chưa có activeRole) → buộc đăng nhập lại để lấy token mới.
+      throw new ForbiddenException('Phiên không hợp lệ. Vui lòng đăng nhập lại.');
+    }
+
+    // ADMIN là superuser — đi qua mọi route có @Roles.
+    if (activeRole === UserRole.ADMIN) return true;
+
+    if (!requiredRoles.includes(activeRole)) {
+      throw new ForbiddenException(
+        `Hành động này yêu cầu vai trò ${requiredRoles.join('/')}, nhưng bạn đang ở chế độ ${activeRole}.`,
+      );
     }
 
     return true;

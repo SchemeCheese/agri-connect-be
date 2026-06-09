@@ -1,4 +1,4 @@
-import { Injectable, BadRequestException, UnauthorizedException, ServiceUnavailableException, Logger } from '@nestjs/common';
+import { Injectable, BadRequestException, UnauthorizedException, ForbiddenException, ServiceUnavailableException, Logger } from '@nestjs/common';
 import { DatabaseService } from '../../database/database.service';
 import { JwtService, JwtSignOptions } from '@nestjs/jwt';
 import * as bcrypt from 'bcrypt';
@@ -10,6 +10,8 @@ import { getAuth } from 'firebase-admin/auth';
 import { cert, getApps, initializeApp } from 'firebase-admin/app';
 import { EmailService } from '../../communication/email/email.service';
 import { VerificationService } from './verification.service';
+
+export type RoleName = 'BUYER' | 'SELLER' | 'ADMIN';
 
 @Injectable()
 export class AuthService {
@@ -36,15 +38,39 @@ export class AuthService {
     initializeApp({ credential: cert({ projectId, clientEmail, privateKey }) });
   }
 
+  // ─── Active-Role RBAC ─────────────────────────────────────────────────────
+  // `allowedRoles` = các vai trò user thực sự sở hữu (suy ra từ flags trong DB).
+  // `activeRole`   = vai trò đang dùng cho phiên hiện tại, được KÝ vào JWT. Guard
+  // chỉ tin `activeRole` (không tin flag) nên FE không thể "giả" quyền: muốn đổi
+  // workspace BUYER↔SELLER phải gọi /auth/switch-role và được BE phát token mới.
+
+  private computeAllowedRoles(user: { is_buyer: boolean; is_seller: boolean; is_admin: boolean }): RoleName[] {
+    const roles: RoleName[] = [];
+    if (user.is_buyer) roles.push('BUYER');
+    if (user.is_seller) roles.push('SELLER');
+    if (user.is_admin) roles.push('ADMIN');
+    // Safety net: mọi user ít nhất là BUYER (base role) — tránh token rỗng quyền.
+    if (roles.length === 0) roles.push('BUYER');
+    return roles;
+  }
+
+  private ownsRole(user: { is_buyer: boolean; is_seller: boolean; is_admin: boolean }, role: RoleName): boolean {
+    if (role === 'BUYER') return !!user.is_buyer;
+    if (role === 'SELLER') return !!user.is_seller;
+    if (role === 'ADMIN') return !!user.is_admin;
+    return false;
+  }
+
   private async buildAuthResponse(
     user: {
       id: string; email: string; full_name: string;
       is_buyer: boolean; is_seller: boolean; is_admin: boolean;
       avatar?: string | null;
     },
+    activeRole: RoleName,
     avatar?: string | null,
   ) {
-    const { access_token, refresh_token } = await this.issueTokens(user);
+    const { access_token, refresh_token } = await this.issueTokens(user, activeRole);
     return {
       message: 'Đăng nhập thành công',
       access_token,
@@ -57,12 +83,64 @@ export class AuthService {
         is_seller: user.is_seller,
         is_admin: user.is_admin,
         avatar: avatar ?? '',
+        activeRole,
+        allowedRoles: this.computeAllowedRoles(user),
       },
     };
   }
 
-  private buildJwtPayload(user: { id: string; email: string; is_buyer: boolean; is_seller: boolean; is_admin: boolean }) {
-    return { sub: user.id, email: user.email, is_buyer: user.is_buyer, is_seller: user.is_seller, is_admin: user.is_admin };
+  // Quyết định bước cuối của login/sync: nếu user sở hữu CẢ BUYER lẫn SELLER →
+  // KHÔNG phát token đầy đủ ngay mà bắt chọn workspace (trả tempToken). Ngược lại
+  // (chỉ 1 vai trò) → phát token đầy đủ luôn với activeRole tương ứng.
+  private async completeLogin(
+    user: { id: string; email: string; full_name: string; is_buyer: boolean; is_seller: boolean; is_admin: boolean },
+    avatar?: string | null,
+  ) {
+    if (user.is_buyer && user.is_seller) {
+      return this.issueRoleSelectionToken(user);
+    }
+    const activeRole: RoleName = user.is_admin ? 'ADMIN' : user.is_seller ? 'SELLER' : 'BUYER';
+    return this.buildAuthResponse(user, activeRole, avatar);
+  }
+
+  // Token tạm thời (ngắn hạn), CHỈ dùng cho /auth/select-role. Mang purpose riêng
+  // nên JwtStrategy/RolesGuard coi nó vô giá trị trên các route nghiệp vụ.
+  private async issueRoleSelectionToken(
+    user: { id: string; email: string; full_name: string; is_buyer: boolean; is_seller: boolean; is_admin: boolean },
+  ) {
+    const allowedRoles = this.computeAllowedRoles(user);
+    const tempToken = await this.jwtService.signAsync(
+      { sub: user.id, email: user.email, purpose: 'role_selection', allowedRoles },
+      { expiresIn: (process.env.JWT_ROLE_SELECT_EXPIRES || '10m') as JwtSignOptions['expiresIn'] },
+    );
+    return {
+      requiresRoleSelection: true as const,
+      tempToken,
+      allowedRoles,
+      user: {
+        id: user.id,
+        email: user.email,
+        full_name: user.full_name,
+        is_buyer: user.is_buyer,
+        is_seller: user.is_seller,
+        is_admin: user.is_admin,
+      },
+    };
+  }
+
+  private buildJwtPayload(
+    user: { id: string; email: string; is_buyer: boolean; is_seller: boolean; is_admin: boolean },
+    activeRole: RoleName,
+  ) {
+    return {
+      sub: user.id,
+      email: user.email,
+      is_buyer: user.is_buyer,
+      is_seller: user.is_seller,
+      is_admin: user.is_admin,
+      allowedRoles: this.computeAllowedRoles(user),
+      activeRole,
+    };
   }
 
   // SHA-256 pre-hash để nén refresh token (dài) xuống 64 hex char trước khi bcrypt,
@@ -83,15 +161,19 @@ export class AuthService {
   // Sinh cặp access (ngắn hạn) + refresh (dài hạn) và LƯU hash refresh vào DB.
   // Gọi ở mọi điểm phát token (login / firebase / become-seller / refresh) → mỗi
   // lần phát là một lần rotate: hash cũ bị ghi đè, refresh token cũ hết hiệu lực.
-  private async issueTokens(user: { id: string; email: string; is_buyer: boolean; is_seller: boolean; is_admin: boolean }) {
+  private async issueTokens(
+    user: { id: string; email: string; is_buyer: boolean; is_seller: boolean; is_admin: boolean },
+    activeRole: RoleName,
+  ) {
     // expiresIn từ env là string thuần; SignOptions.expiresIn nay là
     // `number | StringValue` (StringValue là template-literal type của `ms`),
     // nên cast về đúng kiểu field — runtime vẫn nhận chuỗi '1h'/'7d' như cũ.
-    const access_token = await this.jwtService.signAsync(this.buildJwtPayload(user), {
+    const access_token = await this.jwtService.signAsync(this.buildJwtPayload(user, activeRole), {
       expiresIn: (process.env.JWT_ACCESS_EXPIRES || '1h') as JwtSignOptions['expiresIn'],
     });
+    // activeRole đi kèm refresh token để rotation giữ nguyên workspace đang chọn.
     const refresh_token = await this.jwtService.signAsync(
-      { sub: user.id, type: 'refresh' },
+      { sub: user.id, type: 'refresh', activeRole },
       { expiresIn: (process.env.JWT_REFRESH_EXPIRES || '7d') as JwtSignOptions['expiresIn'] },
     );
 
@@ -109,7 +191,7 @@ export class AuthService {
   // token mới (rotate). Nếu hash không khớp → nghi ngờ token bị lộ/tái sử dụng:
   // xoá hash để buộc đăng nhập lại.
   async refreshToken(userId: string, refreshToken: string) {
-    let payload: { sub?: string; type?: string };
+    let payload: { sub?: string; type?: string; activeRole?: RoleName };
     try {
       payload = await this.jwtService.verifyAsync(refreshToken);
     } catch {
@@ -136,8 +218,51 @@ export class AuthService {
       throw new UnauthorizedException('Refresh token không hợp lệ. Vui lòng đăng nhập lại.');
     }
 
+    // Giữ nguyên activeRole đã ký trong refresh token cũ. Nếu token cũ không có
+    // (token legacy trước đổi mới) HOẶC vai trò đó đã bị thu hồi → suy lại:
+    //  - sở hữu cả 2 vai trò mà không rõ workspace → buộc đăng nhập lại để chọn.
+    //  - còn lại → chọn vai trò duy nhất.
+    let activeRole = payload.activeRole;
+    if (!activeRole || !this.ownsRole(user, activeRole)) {
+      if (user.is_buyer && user.is_seller) {
+        throw new UnauthorizedException('Phiên cần chọn lại vai trò. Vui lòng đăng nhập lại.');
+      }
+      activeRole = user.is_admin ? 'ADMIN' : user.is_seller ? 'SELLER' : 'BUYER';
+    }
+
     // issueTokens (gọi trong buildAuthResponse) sẽ ghi đè hash → rotate.
-    return this.buildAuthResponse(user, user.photo_url ?? undefined);
+    return this.buildAuthResponse(user, activeRole, user.photo_url ?? undefined);
+  }
+
+  // --- CHỌN VAI TRÒ KHI LOGIN (dùng tempToken từ requiresRoleSelection) ---
+  async selectRole(tempToken: string, role: RoleName) {
+    let payload: { sub?: string; purpose?: string };
+    try {
+      payload = await this.jwtService.verifyAsync(tempToken);
+    } catch {
+      throw new UnauthorizedException('Phiên chọn vai trò đã hết hạn. Vui lòng đăng nhập lại.');
+    }
+    if (payload.purpose !== 'role_selection' || !payload.sub) {
+      throw new UnauthorizedException('Token chọn vai trò không hợp lệ.');
+    }
+    return this.issueForRole(payload.sub, role);
+  }
+
+  // --- ĐỔI VAI TRÒ KHI ĐANG ĐĂNG NHẬP (user đã có access token hợp lệ) ---
+  async switchRole(userId: string, role: RoleName) {
+    return this.issueForRole(userId, role);
+  }
+
+  // Phát token đầy đủ với activeRole yêu cầu — SAU KHI xác minh user thực sự sở
+  // hữu vai trò đó trong DB. Đây là chốt chặn chống "FE tự xưng SELLER".
+  private async issueForRole(userId: string, role: RoleName) {
+    const user = await this.databaseService.user.findUnique({ where: { id: userId } });
+    if (!user) throw new UnauthorizedException('Tài khoản không tồn tại.');
+    if (!user.verified_email) throw new ForbiddenException('OTP verification required');
+    if (!this.ownsRole(user, role)) {
+      throw new ForbiddenException(`Tài khoản không sở hữu vai trò ${role}.`);
+    }
+    return this.buildAuthResponse(user, role, user.photo_url ?? undefined);
   }
 
   // --- 1. ĐĂNG KÝ ---
@@ -278,7 +403,8 @@ export class AuthService {
     const user = await this.databaseService.user.findUnique({ where: { email: dto.email } });
 
     if (!user) throw new UnauthorizedException('Email hoặc mật khẩu không đúng');
-    if (!user.verified_email) throw new UnauthorizedException('Tài khoản chưa xác thực. Vui lòng kiểm tra email.');
+    // OTP HARD-GATE: email chưa xác thực → CHẶN đăng nhập (403), không bao giờ bypass.
+    if (!user.verified_email) throw new ForbiddenException('OTP verification required');
 
     const isMatch = await bcrypt.compare(dto.password, user.password_hash);
     if (!isMatch) throw new UnauthorizedException('Email hoặc mật khẩu không đúng');
@@ -289,7 +415,8 @@ export class AuthService {
       data: { last_login_at: new Date() },
     }).catch((e) => this.logger.warn(`[LOGIN] last_login_at update failed: ${(e as Error).message}`));
 
-    return this.buildAuthResponse(user);
+    // Sở hữu cả 2 vai trò → trả requiresRoleSelection; còn lại → token đầy đủ.
+    return this.completeLogin(user);
   }
 
   // --- 3.5. NÂNG CẤP THÀNH SELLER ---
@@ -307,7 +434,9 @@ export class AuthService {
       user.is_seller = true;
     }
 
-    return this.buildAuthResponse(user);
+    // Vừa nâng cấp → đưa thẳng vào workspace SELLER (BE tự cấp quyền, không spoof).
+    // Lần đăng nhập sau, vì đã sở hữu cả 2 vai trò, họ sẽ được hỏi chọn workspace.
+    return this.buildAuthResponse(user, 'SELLER', user.photo_url ?? undefined);
   }
 
   // --- 4. ĐĂNG NHẬP / ĐĂNG KÝ QUA FIREBASE (GOOGLE / EMAIL-PASSWORD-VIA-FIREBASE) ---
@@ -340,12 +469,13 @@ export class AuthService {
       user = await this.databaseService.user.findUnique({ where: { email } });
     }
 
-    const wantBuyer  = dto.role === undefined ? true  : dto.role === 'BUYER';
-    const wantSeller = dto.role === undefined ? false : dto.role === 'SELLER';
+    // `role` chỉ có ý nghĩa khi TẠO MỚI tài khoản (đăng ký lần đầu qua Google).
+    // BUYER luôn là base role; SELLER chỉ bật khi user chủ động chọn lúc tạo.
+    const wantSeller = dto.role === 'SELLER';
     const now = new Date();
 
     if (!user) {
-      // 2a) Insert
+      // 2a) Insert — user Google mới: luôn là BUYER, thêm SELLER nếu được chọn.
       user = await this.databaseService.user.create({
         data: {
           email,
@@ -356,16 +486,17 @@ export class AuthService {
           photo_url: firebasePhoto || null,
           provider,
           last_login_at: now,
-          is_buyer: wantBuyer,
+          is_buyer: true,
           is_seller: wantSeller,
           verified_email: true,
         },
       });
     } else {
-      // 2b) Update — merge role (never remove), refresh Firebase-sourced fields, bump last_login_at
+      // 2b) ACCOUNT LINKING — gắn firebase_uid vào identity sẵn có (kể cả tài khoản
+      // OTP chưa verify): set verified_email=true, refresh field từ Firebase, bump
+      // last_login. KHÔNG nâng quyền theo `role` ở bước login — tránh leo thang đặc
+      // quyền (user chỉ-BUYER không thể tự thành SELLER chỉ bằng đăng nhập Google).
       const shouldUpdateName = firebaseName && (!user.full_name || user.full_name === user.email.split('@')[0]);
-      const addBuyer  = wantBuyer  && !user.is_buyer;
-      const addSeller = wantSeller && !user.is_seller;
 
       user = await this.databaseService.user.update({
         where: { id: user.id },
@@ -377,12 +508,11 @@ export class AuthService {
           ...(firebaseName ? { display_name: firebaseName } : {}),
           ...(firebasePhoto ? { photo_url: firebasePhoto } : {}),
           ...(shouldUpdateName ? { full_name: firebaseName } : {}),
-          ...(addBuyer  ? { is_buyer: true }  : {}),
-          ...(addSeller ? { is_seller: true } : {}),
         },
       });
     }
 
-    return this.buildAuthResponse(user, firebasePhoto || user.photo_url || undefined);
+    // Sở hữu cả 2 vai trò → requiresRoleSelection; còn lại → token đầy đủ.
+    return this.completeLogin(user, firebasePhoto || user.photo_url || undefined);
   }
 }
