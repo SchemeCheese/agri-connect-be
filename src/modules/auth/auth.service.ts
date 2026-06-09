@@ -71,6 +71,15 @@ export class AuthService {
     return createHash('sha256').update(value).digest('hex');
   }
 
+  // Mask an email for logs: "hoangkimchi46@gmail.com" → "ho***********@gmail.com".
+  // Never log the full address (PII) — only enough to recognise it in support.
+  private maskEmail(email: string): string {
+    const [local, domain] = String(email).split('@');
+    if (!domain) return '***';
+    const head = local.slice(0, 2);
+    return `${head}${'*'.repeat(Math.max(1, local.length - 2))}@${domain}`;
+  }
+
   // Sinh cặp access (ngắn hạn) + refresh (dài hạn) và LƯU hash refresh vào DB.
   // Gọi ở mọi điểm phát token (login / firebase / become-seller / refresh) → mỗi
   // lần phát là một lần rotate: hash cũ bị ghi đè, refresh token cũ hết hiệu lực.
@@ -138,8 +147,13 @@ export class AuthService {
     const otpEnabled = process.env.ENABLE_EMAIL_OTP !== 'false';
     const mailConfigured = !!(process.env.MAIL_HOST && process.env.MAIL_USER && process.env.MAIL_PASS);
 
+    // Trace entry: which email, is OTP on, is the mail provider configured.
+    this.logger.log(
+      `[REGISTER] reached BE — email=${this.maskEmail(dto.email)} otpEnabled=${otpEnabled} mailConfigured=${mailConfigured}`,
+    );
+
     if (otpEnabled && !mailConfigured) {
-      this.logger.error('OTP enabled nhưng MAIL_HOST/MAIL_USER/MAIL_PASS chưa set');
+      this.logger.error('[REGISTER] OTP enabled nhưng MAIL_HOST/MAIL_USER/MAIL_PASS chưa set — Email service is not configured');
       throw new ServiceUnavailableException(
         'Hệ thống email chưa cấu hình. Liên hệ admin để fix SMTP.',
       );
@@ -171,16 +185,24 @@ export class AuthService {
 
       try {
         const verification = await this.verificationService.createVerification(existingUser.id);
+        // DEV-ONLY: surface the OTP in logs so you can test without a real inbox.
+        // Gated on NODE_ENV so the code is NEVER printed in production.
+        if (process.env.NODE_ENV !== 'production') {
+          this.logger.debug(`[REGISTER][DEV] OTP for ${this.maskEmail(existingUser.email)} = ${verification.code}`);
+        }
         const ok = await this.emailService.sendVerificationOTP(existingUser.email, verification.code, existingUser.full_name);
         if (!ok) throw new Error('EmailService returned false');
 
-        this.logger.log(`[REGISTER] Resent OTP for existing unverified user ${existingUser.email}`);
+        this.logger.log(`[REGISTER] Resent OTP, email actually sent to ${this.maskEmail(existingUser.email)}`);
         return { message: 'Tài khoản đã tồn tại nhưng chưa xác thực. Mã OTP mới đã được gửi lại.', userId: existingUser.id, emailSent: true };
       } catch (err) {
-        this.logger.error(`[REGISTER] OTP resend failed for ${existingUser.email}: ${(err as Error)?.message}`);
-        const strictOtp = process.env.STRICT_OTP === 'true';
-        if (strictOtp) {
-          throw new ServiceUnavailableException('Không gửi được email OTP. Vui lòng liên hệ admin hoặc thử lại sau.');
+        this.logger.error(`[REGISTER] OTP resend FAILED for ${this.maskEmail(existingUser.email)}: ${(err as Error)?.message}`);
+        // Default: DO NOT pretend success and DO NOT silently verify (that would
+        // bypass OTP). Surface a 503 so the client shows a clear error.
+        // Opt-in escape hatch for local/dev only: STRICT_OTP=false → auto-bypass.
+        const allowBypass = process.env.STRICT_OTP === 'false';
+        if (!allowBypass) {
+          throw new ServiceUnavailableException('Không gửi được email OTP. Vui lòng kiểm tra email hoặc thử lại sau.');
         }
         await this.databaseService.user.update({ where: { id: existingUser.id }, data: { verified_email: true } });
         return {
@@ -214,18 +236,23 @@ export class AuthService {
     if (otpEnabled) {
       try {
         const verification = await this.verificationService.createVerification(newUser.id);
+        // DEV-ONLY OTP log (never printed in production).
+        if (process.env.NODE_ENV !== 'production') {
+          this.logger.debug(`[REGISTER][DEV] OTP for ${this.maskEmail(newUser.email)} = ${verification.code}`);
+        }
         const ok = await this.emailService.sendVerificationOTP(newUser.email, verification.code, newUser.full_name);
         if (!ok) throw new Error('EmailService returned false');
 
+        this.logger.log(`[REGISTER] OTP email actually sent to ${this.maskEmail(newUser.email)}`);
         return { message: 'Đăng ký thành công. Vui lòng kiểm tra email để lấy mã OTP.', userId: newUser.id, emailSent: true };
       } catch (err) {
-        this.logger.error(`[REGISTER] OTP send failed for ${newUser.email}: ${(err as Error)?.message}`);
-        const strictOtp = process.env.STRICT_OTP === 'true';
-        if (strictOtp) {
-          // Production strict mode — yêu cầu OTP phải gửi được
-          throw new ServiceUnavailableException('Không gửi được email OTP. Vui lòng liên hệ admin hoặc thử lại sau.');
+        this.logger.error(`[REGISTER] OTP send FAILED for ${this.maskEmail(newUser.email)}: ${(err as Error)?.message}`);
+        // Default: surface the failure (no silent verify → no OTP bypass).
+        // Opt-in escape hatch for local/dev only: STRICT_OTP=false → auto-bypass.
+        const allowBypass = process.env.STRICT_OTP === 'false';
+        if (!allowBypass) {
+          throw new ServiceUnavailableException('Không gửi được email OTP. Vui lòng kiểm tra email hoặc thử lại sau.');
         }
-        // Mặc định: auto-bypass để user vẫn đăng ký được (UX > strictness)
         await this.databaseService.user.update({ where: { id: newUser.id }, data: { verified_email: true } });
         return {
           message: 'Đăng ký thành công. (OTP tạm bỏ qua — admin đang xử lý vấn đề email)',
