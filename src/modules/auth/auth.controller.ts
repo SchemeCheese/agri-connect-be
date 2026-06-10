@@ -1,4 +1,5 @@
 import { Controller, Post, Body, UseGuards, Request } from '@nestjs/common';
+import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import { AuthService } from './auth.service';
 import { RegisterDto } from './dtos/register.dto';
@@ -8,11 +9,15 @@ import { RefreshTokenDto } from './dtos/refresh-token.dto';
 import { SelectRoleDto, SwitchRoleDto } from './dtos/select-role.dto';
 import { JwtAuthGuard } from './decorators/guards/jwt-auth.guard';
 
+@ApiTags('Auth')
 @Controller('auth')
 export class AuthController {
   constructor(private readonly authService: AuthService) {}
 
   // Gửi OTP qua đăng ký: 5 request / 5 phút / IP (chống spam OTP/email).
+  @ApiOperation({ summary: 'Đăng ký + gửi OTP', description: 'Tạo tài khoản BUYER (kèm SELLER nếu chọn) và gửi OTP email.' })
+  @ApiResponse({ status: 201, description: 'Đã tạo / gửi OTP (autoVerified hoặc emailSent).' })
+  @ApiResponse({ status: 503, description: 'SMTP chưa cấu hình / gửi OTP thất bại.' })
   @Throttle({ default: { limit: 5, ttl: 300000 } })
   @Post('register')
   register(@Body() dto: RegisterDto) {
@@ -20,6 +25,10 @@ export class AuthController {
   }
 
   // Đăng nhập: 5 request / 5 phút / IP (chống brute-force mật khẩu).
+  @ApiOperation({ summary: 'Đăng nhập', description: 'Trả access_token + refresh_token. Dual-role → requiresRoleSelection.' })
+  @ApiResponse({ status: 201, description: 'access_token + user (hoặc requiresRoleSelection + tempToken).' })
+  @ApiResponse({ status: 401, description: 'Sai email/mật khẩu.' })
+  @ApiResponse({ status: 403, description: 'Chưa xác thực OTP.' })
   @Throttle({ default: { limit: 5, ttl: 300000 } })
   @Post('login')
   login(@Body() dto: LoginDto) {
@@ -55,6 +64,9 @@ export class AuthController {
   }
 
   // THÊM API MỚI CHO OTP
+  @ApiOperation({ summary: 'Xác thực OTP email', description: 'Nhập userId + mã OTP 6 số để kích hoạt tài khoản.' })
+  @ApiResponse({ status: 201, description: 'Xác thực thành công.' })
+  @ApiResponse({ status: 400, description: 'OTP sai/hết hạn.' })
   @Post('verify-email')
   verifyEmail(@Body() body: { userId: string; code: string }) {
     return this.authService.verifyEmailOTP(body.userId, body.code);

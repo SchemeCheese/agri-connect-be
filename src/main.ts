@@ -4,6 +4,7 @@ import { NestFactory } from '@nestjs/core';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import { AppModule } from './app.module';
 import { ValidationPipe } from '@nestjs/common';
+import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
 import { join } from 'path';
 
 // Load environment-specific file first (.env.development or .env.production),
@@ -61,6 +62,39 @@ async function bootstrap() {
     methods: 'GET,HEAD,PUT,PATCH,POST,DELETE',
     credentials: true,
   });
+
+  // ─── Swagger / OpenAPI ──────────────────────────────────────────────────
+  // Bật ở dev/staging/demo. Ở production CHỈ bật khi ENABLE_SWAGGER=true.
+  // Swagger thuần tài liệu/test — KHÔNG tắt guard, KHÔNG lộ secret/password_hash.
+  const swaggerEnabled = nodeEnv !== 'production' || process.env.ENABLE_SWAGGER === 'true';
+  if (swaggerEnabled) {
+    const swaggerConfig = new DocumentBuilder()
+      .setTitle('Agri-Connect API')
+      .setDescription('Marketplace API for Buyer, Seller, Admin, Payment, Dispute, Chat, AI')
+      .setVersion('1.0')
+      .addBearerAuth(
+        { type: 'http', scheme: 'bearer', bearerFormat: 'JWT', in: 'header', description: 'Dán access_token (JWT) lấy từ POST /auth/login' },
+        'access-token', // tên scheme — khớp @ApiBearerAuth('access-token')
+      )
+      .addTag('Auth', 'Đăng ký / đăng nhập / OTP / đổi vai trò')
+      .addTag('Users', 'Hồ sơ người dùng')
+      .addTag('Products', 'Sản phẩm & tìm kiếm (public)')
+      .addTag('Cart', 'Giỏ hàng (client-side; checkout qua Orders)')
+      .addTag('Orders', 'Vòng đời đơn hàng / checkout')
+      .addTag('Payments', 'MoMo create / IPN / refund')
+      .addTag('Reviews', 'Đánh giá sau đơn')
+      .addTag('Disputes', 'Khiếu nại (buyer mở / seller giải trình)')
+      .addTag('Admin', 'Quản trị: dashboard, users, phán quyết tranh chấp')
+      .addTag('Chat', 'Tin nhắn / thương lượng')
+      .addTag('AI Assistant', 'Trợ lý AI (Buyer/Seller)')
+      .build();
+    const document = SwaggerModule.createDocument(app, swaggerConfig);
+    SwaggerModule.setup('api-docs', app, document, {
+      swaggerOptions: { persistAuthorization: true }, // giữ token sau khi reload trang
+      customSiteTitle: 'Agri-Connect API Docs',
+    });
+    console.log('[Bootstrap] Swagger UI: /api-docs');
+  }
 
   // Bind explicitly to 0.0.0.0 so phones on the same Wi-Fi (Expo Go) can
   // reach the dev server at the host's LAN IP, not just localhost.

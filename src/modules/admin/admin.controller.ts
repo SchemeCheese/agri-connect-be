@@ -1,4 +1,5 @@
 import { Body, Controller, Get, Param, Patch, Post, Query, Request, UseGuards } from '@nestjs/common';
+import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/decorators/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/decorators/guards/roles.guard';
 import { Roles, UserRole } from '../auth/decorators/roles.decorator';
@@ -8,6 +9,8 @@ import { AdjudicateDto, ModerateProductDto, SetTrustStatusDto, SetUserStatusDto,
 
 // Toàn bộ route /admin/* yêu cầu JWT hợp lệ + activeRole = ADMIN (RolesGuard coi
 // ADMIN là superuser). Buyer/Seller gọi vào sẽ nhận 403 Forbidden.
+@ApiTags('Admin')
+@ApiBearerAuth('access-token')
 @Controller('admin')
 @UseGuards(JwtAuthGuard, RolesGuard)
 @Roles(UserRole.ADMIN)
@@ -18,12 +21,14 @@ export class AdminController {
   ) {}
 
   // ─── Dashboard ───────────────────────────────────────────────────────────
+  @ApiOperation({ summary: 'Dashboard quản trị', description: 'Thống kê users/products/orders/doanh thu (yêu cầu token ADMIN).' })
   @Get('analytics/dashboard')
   dashboard() {
     return this.admin.dashboard();
   }
 
   // ─── Users ─────────────────────────────────────────────────────────────
+  @ApiOperation({ summary: 'Danh sách user (phân trang + tìm kiếm)', description: 'KHÔNG trả password_hash. Yêu cầu ADMIN.' })
   @Get('users')
   listUsers(@Query('page') page?: string, @Query('limit') limit?: string, @Query('search') search?: string) {
     return this.admin.listUsers({ page, limit, search });
@@ -109,6 +114,7 @@ export class AdminController {
   }
 
   // Alias đúng tên spec: POST /admin/disputes/:id/resolve (cùng logic adjudicate).
+  @ApiOperation({ summary: 'Phán quyết tranh chấp (ADMIN)', description: 'outcome + action → refund/complete. Ghi AuditLog. Yêu cầu ADMIN.' })
   @Post('disputes/:id/resolve')
   resolve(@Request() req, @Param('id') id: string, @Body() dto: AdjudicateDto) {
     return this.disputes.adjudicate(req.user.sub, id, dto);

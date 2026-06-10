@@ -12,6 +12,7 @@ import {
   UploadedFiles,
   UseInterceptors,
 } from '@nestjs/common';
+import { ApiTags, ApiOperation } from '@nestjs/swagger';
 import { ProductsService } from './products.service';
 import { CreateProductDto } from './dtos/create-product.dto';
 import { AuthGuard } from '@nestjs/passport'; 
@@ -37,6 +38,7 @@ const multerOptions = {
   limits: { fileSize: 5 * 1024 * 1024, files: 6 },
 };
 
+@ApiTags('Products')
 @Controller('products')
 export class ProductsController {
   constructor(private readonly productsService: ProductsService) {}
@@ -57,6 +59,7 @@ export class ProductsController {
   }
 
   // API lấy danh sách cho trang chủ
+  @ApiOperation({ summary: 'Danh sách sản phẩm (public)', description: 'Trả mảng sản phẩm active cho trang chủ.' })
   @Get()
   async getAllProducts() {
     return this.productsService.findAllPublic();
@@ -64,6 +67,7 @@ export class ProductsController {
 
   // Tìm kiếm sản phẩm có phân trang (PostgreSQL insensitive contains). KHÔNG đổi
   // GET / (findAllPublic) để tránh vỡ FE cũ. Phải đặt TRƯỚC :id.
+  @ApiOperation({ summary: 'Tìm kiếm sản phẩm (phân trang)', description: 'PostgreSQL insensitive contains; ẩn sản phẩm inactive. Trả { items, total, page, totalPages }.' })
   @Get('search')
   async searchProducts(
     @Query('q') q?: string,

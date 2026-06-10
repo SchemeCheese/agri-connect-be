@@ -1,5 +1,6 @@
 import { Controller, Post, Get, Patch, Body, Param, Query, UseGuards, Request } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
+import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
 import { ReviewsService } from './reviews.service';
 import { CreateReviewDto } from './dtos/create-review.dto';
 import { ReplyReviewDto } from './dtos/reply-review.dto';
@@ -8,12 +9,15 @@ import { RolesGuard } from '../auth/decorators/guards/roles.guard';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { UserRole } from '../auth/decorators/roles.decorator';
 
+@ApiTags('Reviews')
+@ApiBearerAuth('access-token')
 @Controller('reviews')
 @UseGuards(JwtAuthGuard)
 export class ReviewsController {
   constructor(private readonly reviewsService: ReviewsService) {}
 
   // POST /reviews — Buyer tạo đánh giá (chỉ sau khi đơn COMPLETED). 3 req/phút/IP.
+  @ApiOperation({ summary: 'Tạo đánh giá', description: 'BUYER đánh giá đơn COMPLETED. Trùng → 400. Rate-limit 3/phút.' })
   @Throttle({ default: { limit: 3, ttl: 60000 } })
   @UseGuards(RolesGuard)
   @Roles(UserRole.BUYER)

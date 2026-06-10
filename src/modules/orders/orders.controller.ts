@@ -1,5 +1,6 @@
 import { Controller, Post, Patch, Body, UseGuards, Request, Get, Param, ForbiddenException, BadRequestException } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
+import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
 import { PaymentMethod } from '@prisma/client';
 import { OrdersService } from './orders.service';
 import { PaymentsService } from '../payments/payments.service';
@@ -13,6 +14,8 @@ import { RolesGuard } from '../auth/decorators/guards/roles.guard';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { UserRole } from '../auth/decorators/roles.decorator';
 
+@ApiTags('Orders')
+@ApiBearerAuth('access-token')
 @Controller('orders')
 @UseGuards(JwtAuthGuard)
 export class OrdersController {
@@ -24,6 +27,7 @@ export class OrdersController {
 
     // ─── BUYER: Đặt hàng ─────────────────────────────────────────────────────
     // Tạo đơn: 5 request / phút / IP (chống spam tạo đơn / lạm dụng trừ kho).
+    @ApiOperation({ summary: 'Checkout (tạo đơn)', description: 'BUYER tạo đơn từ giỏ; trừ tồn kho atomic. Rate-limit 5/phút.' })
     @Throttle({ default: { limit: 5, ttl: 60000 } })
     @UseGuards(RolesGuard)
     @Roles(UserRole.BUYER)
@@ -42,6 +46,7 @@ export class OrdersController {
     }
 
     // ─── BUYER: Xem đơn của mình ──────────────────────────────────────────────
+    @ApiOperation({ summary: 'Đơn của tôi (BUYER)', description: 'Danh sách đơn của buyer đang đăng nhập.' })
     @UseGuards(RolesGuard)
     @Roles(UserRole.BUYER)
     @Get('my-orders')
@@ -66,6 +71,7 @@ export class OrdersController {
     }
 
     // ─── BUYER: Xem chi tiết 1 đơn hàng ─────────────────────────────────────
+    @ApiOperation({ summary: 'Chi tiết đơn (BUYER)', description: 'Chỉ trả đơn thuộc về buyer đang đăng nhập (IDOR-safe).' })
     @UseGuards(RolesGuard)
     @Roles(UserRole.BUYER)
     @Get(':id')
@@ -174,6 +180,7 @@ export class OrdersController {
     }
 
     // ─── BUYER: Tự hủy đơn  PENDING → CANCELLED ──────────────────────────────
+    @ApiOperation({ summary: 'Hủy đơn (BUYER)', description: 'PENDING → CANCELLED; tự hoàn tồn kho đã trừ.' })
     @UseGuards(RolesGuard)
     @Roles(UserRole.BUYER)
     @Patch(':id/cancel-by-buyer')

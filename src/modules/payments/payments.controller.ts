@@ -1,14 +1,18 @@
 import { BadRequestException, Body, Controller, Get, Param, Post, Query, Redirect, Request, UseGuards } from '@nestjs/common';
 import { SkipThrottle } from '@nestjs/throttler';
+import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
 import { PaymentsService } from './payments.service';
 import { MomoCreateDto } from './dtos/momo-create.dto';
 import { AuthGuard } from '@nestjs/passport';
 
+@ApiTags('Payments')
 @Controller('payments')
 export class PaymentsController {
   constructor(private readonly paymentsService: PaymentsService) {}
 
   // Buyer tạo yêu cầu thanh toán MoMo cho đơn đã checkout với payment_method = MOMO
+  @ApiOperation({ summary: 'Tạo thanh toán MoMo', description: 'Trả payUrl/deeplink MoMo cho đơn/CheckoutSession.' })
+  @ApiBearerAuth('access-token')
   @UseGuards(AuthGuard('jwt'))
   @Post('momo/create')
   async createMomo(@Request() req, @Body() dto: MomoCreateDto) {
@@ -21,6 +25,7 @@ export class PaymentsController {
 
   // MoMo gọi IPN (notify) — server-to-server POST. Miễn rate-limit (webhook ngoài,
   // idempotent theo momo_trans_id) để không bị 429 chặn callback thanh toán.
+  @ApiOperation({ summary: 'MoMo IPN webhook (server-to-server)', description: 'MoMo gọi xác nhận thanh toán. Verify signature + idempotent theo transId. KHÔNG dùng cho client.' })
   @SkipThrottle()
   @Post('momo/ipn')
   async momoIpn(@Body() body: any) {
