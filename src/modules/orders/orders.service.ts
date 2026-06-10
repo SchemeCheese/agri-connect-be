@@ -14,7 +14,7 @@ import { PaymentsService } from '../payments/payments.service';
 import { ChatGateway } from '../chat/chat.gateway';
 import { CreateOrderDto } from './dtos/create-order.dto';
 import { CheckoutQuoteDto } from './dtos/checkout-quote.dto';
-import { OrderStatus, PaymentStatus, PaymentMethod, PaymentType, QuoteStatus, MessageType } from '@prisma/client';
+import { OrderStatus, PaymentStatus, PaymentMethod, PaymentType, QuoteStatus, MessageType, ProductStatus, DisputeStatus } from '@prisma/client';
 import { QUOTE_EXPIRY_MS, QUOTE_EXPIRED_MESSAGE } from '../chat/negotiation.service';
 
 // Số ngày sau khi giao hàng buyer mới được phép báo sự cố (SHIPPING overdue window)
@@ -408,6 +408,16 @@ export class OrdersService {
                             throw new BadRequestException('Product out of stock');
                         }
                     }
+
+                    // Sản phẩm vừa hết kho (stock về 0) → tự đánh dấu OUT_OF_STOCK để ẩn khỏi listing.
+                    await prisma.product.updateMany({
+                        where: {
+                            id: { in: items.map((i) => i.product_id) },
+                            stock_quantity: { lte: 0 },
+                            status: ProductStatus.ACTIVE,
+                        },
+                        data: { status: ProductStatus.OUT_OF_STOCK, is_active: false },
+                    });
 
                     // Tạo Order
                     const newOrder = await prisma.order.create({
@@ -880,6 +890,9 @@ export class OrdersService {
             },
         });
 
+        // Mở Dispute để Admin phân xử (KHÔNG tự refund). Idempotent: đã có thì bỏ qua.
+        await this.ensureDisputeForOrder(order, issueNote);
+
         await this.emitOrderStatusUpdate(
             orderId,
             buyerId,
@@ -971,85 +984,24 @@ export class OrdersService {
         }
 
         const issueNote = note ?? 'Người mua báo chưa nhận được hàng.';
-        const isCod = order.payment_method === PaymentMethod.COD;
-        const isMomo = order.payment_method === PaymentMethod.MOMO;
-        const payment = order.payments?.[0];
-        const paymentAlreadyPaid = payment?.status === PaymentStatus.PAID;
 
-        // ── Rule 1 (COD): no money moved, just mark RETURNED ───────────────
-        if (isCod) {
-            await this.databaseService.$transaction(async (tx) => {
-                await tx.order.update({
-                    where: { id: orderId },
-                    data: { status: OrderStatus.RETURNED, note: issueNote },
-                });
-                await this.paymentsService.markFailed(tx, orderId);
-            });
-            return { message: 'Đơn COD đã được đánh dấu RETURNED. Không phát sinh hoàn tiền.' };
-        }
-
-        // ── Rule 3 (MoMo prepaid): queue + auto-refund ngay ─────────────────
-        // Bước 1 (tx): Order=REFUND_PENDING + Payment=REFUNDING.
-        // Bước 2: gọi MoMo refund API — refundMomoTransaction chấp nhận
-        //   Payment.status REFUNDING, idempotent với REFUNDED, và khi thành công
-        //   sẽ tự flip Order=REFUNDED + Payment=REFUNDED trong transaction nội bộ.
-        // Nếu MoMo từ chối: giữ nguyên REFUND_PENDING/REFUNDING để admin retry,
-        //   không throw lên buyer (họ đã hoàn tất report).
-        if (isMomo && paymentAlreadyPaid) {
-            await this.databaseService.$transaction(async (tx) => {
-                await tx.order.update({
-                    where: { id: orderId },
-                    data: { status: OrderStatus.REFUND_PENDING, note: issueNote },
-                });
-                await this.paymentsService.markRefunding(tx, orderId);
-            });
-
-            try {
-                this.logger.log(
-                    `Refund MoMo order ${orderId} (session=${order.checkout_session_id ?? 'legacy'}) amount=${order.final_total_price}`,
-                );
-                // Đơn mới thuộc CheckoutSession → partial refund theo session; đơn cũ → legacy.
-                if (order.checkout_session_id) {
-                    await this.paymentsService.refundPayment(
-                        order.checkout_session_id,
-                        Number(order.final_total_price),
-                        { orderId, reason: issueNote },
-                    );
-                } else {
-                    await this.paymentsService.refundMomoTransaction(
-                        orderId,
-                        Number(order.final_total_price),
-                        issueNote,
-                    );
-                }
-                return {
-                    message: 'Đã hoàn tiền MoMo thành công. Đơn chuyển sang REFUNDED.',
-                    refunded: true,
-                };
-            } catch (err) {
-                this.logger.error(
-                    `Auto-refund MoMo failed for order ${orderId}: ${(err as Error).message}. ` +
-                    `Đơn giữ ở REFUND_PENDING để admin xử lý lại.`,
-                );
-                return {
-                    message: 'Đã ghi nhận tranh chấp MoMo. Hệ thống sẽ hoàn tiền sau khi admin xác nhận.',
-                    refunded: false,
-                };
-            }
-        }
-
-        // ── Other prepaid (QR_CODE/ZALOPAY) or MoMo-but-not-paid ───────────
-        // Fallback to legacy ISSUE_REPORTED + REFUNDING flow.
+        // ── ADMIN-ONLY RESOLUTION ──────────────────────────────────────────
+        // KHÔNG tự refund / không tự đóng đơn. Mở Dispute (OPEN) + đưa đơn về
+        // ISSUE_REPORTED. Người bán giải trình (PATCH /disputes/:id/respond),
+        // sau đó ADMIN phán quyết hoàn tiền hay không (POST /admin/disputes/:id/adjudicate).
         await this.databaseService.$transaction(async (tx) => {
             await tx.order.update({
                 where: { id: orderId },
                 data: { status: OrderStatus.ISSUE_REPORTED, note: issueNote },
             });
-            if (paymentAlreadyPaid) {
-                await this.paymentsService.markRefunding(tx, orderId);
-            }
         });
-        return { message: 'Đã ghi nhận sự cố, đang chờ xử lý.' };
+        await this.ensureDisputeForOrder(order, issueNote);
+
+        return {
+            message:
+                'Đã mở khiếu nại. Người bán sẽ giải trình và Admin sẽ phán quyết hoàn tiền (nếu có). ' +
+                'Hệ thống không tự hoàn tiền.',
+        };
     }
 
     // =====================================================
@@ -1077,130 +1029,87 @@ export class OrdersService {
             );
 
         const payment = order.payments?.[0];
-        const isMomo = order.payment_method === PaymentMethod.MOMO;
-        const isCod = order.payment_method === PaymentMethod.COD;
-        const paymentPaid = payment?.status === PaymentStatus.PAID;
-        const sellerName = order.seller?.full_name ?? 'Người bán';
 
-        // ── Handle COD: no refund needed, just mark as FAILED ────────────────
-        if (isCod) {
-            await this.databaseService.$transaction(async (tx) => {
-                await tx.order.update({
-                    where: { id: orderId },
-                    data: { status: OrderStatus.FAILED },
-                });
-                await this.paymentsService.markFailed(tx, orderId);
-            });
-
-            await this.emitOrderStatusUpdate(orderId, sellerId, OrderStatus.FAILED);
-
-            try {
-                if (order.buyer?.email) {
-                    await this.emailService.sendOrderFailedCodEmail(
-                        order.buyer.email,
-                        order.buyer.full_name,
-                        sellerName,
-                        orderId,
-                    );
-                }
-            } catch (error) {
-                this.logger.error('Lỗi gửi email:', error);
-            }
-
-            return {
-                message: 'Xác nhận giao thất bại. Đơn hàng đã được đóng và người mua đã được thông báo.',
-                payment_status: PaymentStatus.FAILED,
-            };
-        }
-
-        // ── Handle MOMO: verify payment is PAID before attempting refund ──────
-        if (isMomo && !paymentPaid) {
-            throw new BadRequestException(
-                `Không thể hoàn tiền cho đơn MoMo chưa được thanh toán. Trạng thái payment: ${payment?.status ?? 'unknown'}`,
-            );
-        }
-
-        // ── Handle MOMO PAID: attempt refund API call ────────────────────────
-        if (isMomo && paymentPaid) {
-            try {
-                this.logger.log(
-                    `[confirmLost] Refund MoMo order ${orderId} (session=${order.checkout_session_id ?? 'legacy'})`,
-                );
-
-                // Call refund API (may fail due to network, MoMo unavailable, etc.)
-                if (order.checkout_session_id) {
-                    await this.paymentsService.refundPayment(
-                        order.checkout_session_id,
-                        Number(order.final_total_price),
-                        { orderId, reason: 'Người bán xác nhận thất lạc hàng' },
-                    );
-                } else {
-                    await this.paymentsService.refundMomoTransaction(
-                        orderId,
-                        Number(order.final_total_price),
-                        'Người bán xác nhận thất lạc hàng',
-                    );
-                }
-
-                // Refund succeeded: now update Order + Payment atomically
-                await this.databaseService.$transaction(async (tx) => {
-                    await tx.order.update({
-                        where: { id: orderId },
-                        data: { status: OrderStatus.FAILED },
-                    });
-                    await this.paymentsService.markRefunded(tx, orderId);
-                });
-
-                await this.emitOrderStatusUpdate(orderId, sellerId, OrderStatus.FAILED);
-
-                this.logger.log(`[confirmLost] ✅ Refund succeeded, order marked FAILED: ${orderId}`);
-            } catch (error) {
-                // Refund API failed: leave order as ISSUE_REPORTED for manual retry
-                const errorMsg = (error as Error).message;
-                this.logger.error(
-                    `[confirmLost] ❌ Refund API failed for order ${orderId}: ${errorMsg}. Order kept as ISSUE_REPORTED.`,
-                    (error as Error).stack,
-                );
-                throw new InternalServerErrorException(
-                    `Hoàn tiền MoMo thất bại: ${errorMsg}. Vui lòng thử lại sau hoặc liên hệ quản trị viên.`,
-                );
-            }
-        }
-
-        // ── Handle other prepaid methods (QR_CODE, ZALOPAY, etc.) ────────────
-        // Mark as FAILED but don't attempt refund (not implemented)
-        await this.databaseService.$transaction(async (tx) => {
-            await tx.order.update({
-                where: { id: orderId },
-                data: { status: OrderStatus.FAILED },
-            });
-            if (paymentPaid) {
-                await this.paymentsService.markRefunding(tx, orderId);
-            } else {
-                await this.paymentsService.markFailed(tx, orderId);
-            }
+        // ── ADMIN-ONLY: người bán KHÔNG được tự refund / tự đóng đơn ──────────
+        // "Xác nhận thất lạc" giờ = ESCALATE cho Admin: đảm bảo có Dispute và đưa
+        // sang UNDER_ADMIN_REVIEW kèm giải trình của người bán. Admin là người
+        // DUY NHẤT phán quyết hoàn tiền (POST /admin/disputes/:id/adjudicate).
+        // TUYỆT ĐỐI KHÔNG gọi refund / không set FAILED tại đây.
+        const dispute = await this.ensureDisputeForOrder(
+            order,
+            order.note ?? 'Người mua báo chưa nhận được hàng.',
+        );
+        await this.databaseService.dispute.update({
+            where: { id: dispute.id },
+            data: {
+                seller_explanation: 'Người bán xác nhận hàng đã thất lạc trong quá trình vận chuyển.',
+                status: DisputeStatus.UNDER_ADMIN_REVIEW,
+            },
         });
 
-        await this.emitOrderStatusUpdate(orderId, sellerId, OrderStatus.FAILED);
-
-        try {
-            if (order.buyer?.email) {
-                await this.emailService.sendRefundNotificationEmail(
-                    order.buyer.email,
-                    order.buyer.full_name,
-                    orderId,
-                    order.final_total_price.toString(),
-                    order.payment_method,
-                );
-            }
-        } catch (error) {
-            this.logger.error('Lỗi gửi email:', error);
-        }
+        await this.emitOrderStatusUpdate(
+            orderId,
+            sellerId,
+            OrderStatus.ISSUE_REPORTED,
+            'Người bán đã xác nhận thất lạc — chuyển Admin phân xử.',
+        );
 
         return {
-            message: 'Xác nhận thất lạc. Hệ thống đang tiến hành hoàn tiền cho người mua.',
-            payment_status: paymentPaid ? PaymentStatus.REFUNDING : PaymentStatus.FAILED,
+            message:
+                'Đã chuyển khiếu nại cho Admin phân xử. Hệ thống KHÔNG tự hoàn tiền — Admin sẽ quyết định dựa trên bằng chứng.',
+            payment_status: payment?.status ?? PaymentStatus.UNPAID,
         };
+    }
+
+    // =====================================================
+    // Hoàn tồn kho cho 1 đơn — gọi khi đơn HỦY/THẤT BẠI (tồn kho đã bị trừ lúc
+    // checkout). Cộng lại stock theo từng order_item; nếu sản phẩm đang
+    // OUT_OF_STOCK mà được cộng kho > 0 → bật lại ACTIVE. Mỗi transition hủy/thất
+    // bại đều guard status nên hàm này chỉ chạy 1 lần / đơn (không hoàn kho 2 lần).
+    // =====================================================
+    // Tạo Dispute (nếu chưa có) khi buyer báo sự cố — KHÔNG refund ở đây. Admin là
+    // người duy nhất phán quyết hoàn tiền (xem DisputeService.adjudicate).
+    private async ensureDisputeForOrder(
+        order: { id: string; buyer_id: string; seller_id: string },
+        reason: string,
+    ) {
+        const existing = await this.databaseService.dispute.findUnique({ where: { order_id: order.id } });
+        if (existing) return existing;
+        return this.databaseService.dispute.create({
+            data: {
+                order_id: order.id,
+                buyer_id: order.buyer_id,
+                seller_id: order.seller_id,
+                buyer_reason: reason,
+                status: DisputeStatus.PENDING_SELLER_RESPONSE,
+            },
+        });
+    }
+
+    private async restoreStockForOrder(orderId: string) {
+        const items = await this.databaseService.orderItem.findMany({
+            where: { order_id: orderId },
+            select: { product_id: true, quantity: true },
+        });
+        if (items.length === 0) return;
+
+        await this.databaseService.$transaction(
+            items.map((it) =>
+                this.databaseService.product.update({
+                    where: { id: it.product_id },
+                    data: { stock_quantity: { increment: it.quantity } },
+                }),
+            ),
+        );
+
+        await this.databaseService.product.updateMany({
+            where: {
+                id: { in: items.map((it) => it.product_id) },
+                status: ProductStatus.OUT_OF_STOCK,
+                stock_quantity: { gt: 0 },
+            },
+            data: { status: ProductStatus.ACTIVE, is_active: true },
+        });
     }
 
     // =====================================================
@@ -1222,6 +1131,9 @@ export class OrdersService {
             where: { id: orderId },
             data: { status: OrderStatus.CANCELLED },
         });
+
+        // Đơn bị hủy → hoàn lại tồn kho đã trừ lúc checkout.
+        await this.restoreStockForOrder(orderId);
 
         await this.emitOrderStatusUpdate(orderId, sellerId, OrderStatus.CANCELLED);
 
@@ -1260,6 +1172,9 @@ export class OrdersService {
             where: { id: orderId },
             data: { status: OrderStatus.CANCELLED },
         });
+
+        // Đơn bị hủy → hoàn lại tồn kho đã trừ lúc checkout.
+        await this.restoreStockForOrder(orderId);
 
         await this.emitOrderStatusUpdate(orderId, buyerId, OrderStatus.CANCELLED);
 
@@ -1360,6 +1275,11 @@ export class OrdersService {
             });
             await this.paymentsService.batchFailUnpaid(tx, ids);
         });
+
+        // Hoàn lại tồn kho cho các đơn vừa bị auto-hủy.
+        for (const id of ids) {
+            await this.restoreStockForOrder(id);
+        }
 
         this.logger.log(`[cron] Auto-cancelled ${ids.length} unpaid MoMo orders older than ${UNPAID_MOMO_ORDER_TIMEOUT_HOURS}h: ${ids.join(', ')}`);
     }

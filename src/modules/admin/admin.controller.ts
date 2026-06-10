@@ -4,7 +4,7 @@ import { RolesGuard } from '../auth/decorators/guards/roles.guard';
 import { Roles, UserRole } from '../auth/decorators/roles.decorator';
 import { AdminService } from './admin.service';
 import { DisputeService } from './dispute.service';
-import { AdjudicateDto, ModerateProductDto, SetUserStatusDto, VerifyShopDto } from './dtos/admin.dtos';
+import { AdjudicateDto, ModerateProductDto, SetTrustStatusDto, SetUserStatusDto, VerifyShopDto } from './dtos/admin.dtos';
 
 // Toàn bộ route /admin/* yêu cầu JWT hợp lệ + activeRole = ADMIN (RolesGuard coi
 // ADMIN là superuser). Buyer/Seller gọi vào sẽ nhận 403 Forbidden.
@@ -50,6 +50,11 @@ export class AdminController {
     return this.admin.verifyShop(userId, dto.is_verified);
   }
 
+  @Patch('shops/:userId/trust-status')
+  setShopTrust(@Param('userId') userId: string, @Body() dto: SetTrustStatusDto) {
+    return this.admin.setShopTrust(userId, dto.trust_status);
+  }
+
   // ─── Product moderation ─────────────────────────────────────────────────
   @Get('products')
   listProducts(
@@ -59,6 +64,11 @@ export class AdminController {
     @Query('status') status?: string,
   ) {
     return this.admin.listProducts({ page, limit, search, status });
+  }
+
+  @Get('products/:id/details')
+  productDetails(@Param('id') id: string) {
+    return this.admin.productDetails(id);
   }
 
   @Patch('products/:id/moderation')

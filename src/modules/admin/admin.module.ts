@@ -3,10 +3,13 @@ import { AdminController } from './admin.controller';
 import { DisputeController } from './dispute.controller';
 import { AdminService } from './admin.service';
 import { DisputeService } from './dispute.service';
+import { PaymentsModule } from '../payments/payments.module';
 
 // DatabaseModule là @Global() nên không cần import lại. JwtAuthGuard dùng strategy
-// 'jwt' do AuthModule đăng ký toàn cục.
+// 'jwt' do AuthModule đăng ký toàn cục. PaymentsModule export PaymentsService để
+// DisputeService.adjudicate gọi refund khi Admin phán quyết.
 @Module({
+  imports: [PaymentsModule],
   controllers: [AdminController, DisputeController],
   providers: [AdminService, DisputeService],
 })

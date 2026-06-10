@@ -1,5 +1,6 @@
-import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { DatabaseService } from '../../database/database.service';
+import { PaymentsService } from '../payments/payments.service';
 import {
   DisputeStatus,
   OrderStatus,
@@ -19,7 +20,12 @@ const PARTY_SELECT = { select: { id: true, full_name: true, email: true } };
 
 @Injectable()
 export class DisputeService {
-  constructor(private readonly db: DatabaseService) {}
+  private readonly logger = new Logger(DisputeService.name);
+
+  constructor(
+    private readonly db: DatabaseService,
+    private readonly payments: PaymentsService,
+  ) {}
 
   // ─── BUYER: mở khiếu nại cho 1 đơn ───────────────────────────────────────
   async createByBuyer(buyerId: string, orderId: string, dto: CreateDisputeDto) {
@@ -31,11 +37,11 @@ export class DisputeService {
     if (order.buyer_id !== buyerId) throw new ForbiddenException('Bạn không sở hữu đơn hàng này.');
     if (order.dispute) throw new BadRequestException('Đơn hàng này đã có khiếu nại.');
 
-    // Cho phép mở khiếu nại khi đơn đang giao hoặc đã báo sự cố.
-    const allowedToDispute: OrderStatus[] = [OrderStatus.SHIPPING, OrderStatus.ISSUE_REPORTED];
+    // Cho phép mở khiếu nại khi đơn đang giao, đã báo sự cố, hoặc vừa hoàn tất.
+    const allowedToDispute: OrderStatus[] = [OrderStatus.SHIPPING, OrderStatus.ISSUE_REPORTED, OrderStatus.COMPLETED];
     if (!allowedToDispute.includes(order.status)) {
       throw new BadRequestException(
-        `Chỉ có thể khiếu nại đơn đang SHIPPING hoặc ISSUE_REPORTED. Hiện tại: ${order.status}`,
+        `Chỉ có thể khiếu nại đơn đang SHIPPING, ISSUE_REPORTED hoặc COMPLETED. Hiện tại: ${order.status}`,
       );
     }
 
@@ -169,8 +175,15 @@ export class DisputeService {
         ? DisputeStatus.CLOSED
         : DisputeStatus.RESOLVED;
 
-    const ops: Prisma.PrismaPromise<unknown>[] = [
-      this.db.dispute.update({
+    const isRefundAction =
+      dto.action_taken === ResolutionAction.REFUND_BUYER || dto.action_taken === ResolutionAction.PARTIAL_REFUND;
+    const order = dispute.order;
+    const reason = dto.admin_notes?.trim() || 'Admin phán quyết hoàn tiền cho người mua.';
+
+    // B1: ghi nhận phán quyết + đổi trạng thái đơn (+ đánh dấu REFUNDING nếu refund
+    //     online) — tất cả trong 1 $transaction.
+    await this.db.$transaction(async (tx) => {
+      await tx.dispute.update({
         where: { id },
         data: {
           outcome: dto.outcome,
@@ -179,12 +192,33 @@ export class DisputeService {
           status: finalStatus,
           resolved_at: new Date(),
         },
-      }),
-    ];
-    if (newOrderStatus) {
-      ops.push(this.db.order.update({ where: { id: dispute.order_id }, data: { status: newOrderStatus } }));
+      });
+      if (newOrderStatus) {
+        await tx.order.update({ where: { id: dispute.order_id }, data: { status: newOrderStatus } });
+      }
+      if (isRefundAction && hasOnlinePaid) {
+        await this.payments.markRefunding(tx, dispute.order_id);
+      }
+    });
+
+    // B2: refund online thực sự (ngoài tx — refund service tự flip REFUNDED khi
+    //     thành công). Lỗi API → giữ REFUND_PENDING để admin retry, KHÔNG nuốt phán quyết.
+    if (isRefundAction && hasOnlinePaid) {
+      try {
+        if (order.checkout_session_id) {
+          await this.payments.refundPayment(order.checkout_session_id, Number(order.final_total_price), {
+            orderId: dispute.order_id,
+            reason,
+          });
+        } else {
+          await this.payments.refundMomoTransaction(dispute.order_id, Number(order.final_total_price), reason);
+        }
+      } catch (err) {
+        this.logger.error(
+          `[adjudicate] Refund FAILED cho đơn ${dispute.order_id}: ${(err as Error).message}. Giữ REFUND_PENDING để retry.`,
+        );
+      }
     }
-    await this.db.$transaction(ops);
 
     return this.getById(id);
   }

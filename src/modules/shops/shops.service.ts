@@ -28,6 +28,8 @@ export class ShopsService {
             store_name: true,
             address: true,
             description: true,
+            is_verified: true, // public: dấu tích shop đã xác minh
+            trust_status: true, // public: mức tin cậy (KHÔNG expose số report/dispute thô)
             cover_url: true,
             shop_location_name: true,
             shop_google_maps_url: true,
@@ -105,6 +107,8 @@ export class ShopsService {
         description: s.profile?.description ?? null,
         avatar_url: avatarMap[s.id] ?? null,
         banner_url: s.profile?.cover_url ?? null,
+        is_verified: s.profile?.is_verified ?? false,
+        trust_status: s.profile?.trust_status ?? 'NORMAL',
         // ─── Shop location / Google Maps ─────────────────────────────────
         shop_location_name: s.profile?.shop_location_name ?? null,
         shop_google_maps_url: s.profile?.shop_google_maps_url ?? null,

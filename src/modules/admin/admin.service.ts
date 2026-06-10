@@ -1,6 +1,6 @@
 import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { DatabaseService } from '../../database/database.service';
-import { OrderStatus, Prisma, ProductStatus } from '@prisma/client';
+import { OrderStatus, Prisma, ProductStatus, TrustStatus } from '@prisma/client';
 
 const num = (v: string | undefined, def: number) => {
   const n = Number(v);
@@ -122,6 +122,17 @@ export class AdminService {
       where: { user_id: userId },
       data: { is_verified: isVerified },
       select: { id: true, store_name: true, is_verified: true },
+    });
+  }
+
+  // Admin điều chỉnh mức tin cậy shop (penalty/trust). KHÔNG expose số report thô.
+  async setShopTrust(userId: string, trust: TrustStatus) {
+    const profile = await this.db.profile.findUnique({ where: { user_id: userId } });
+    if (!profile) throw new NotFoundException('Shop / hồ sơ không tồn tại.');
+    return this.db.profile.update({
+      where: { user_id: userId },
+      data: { trust_status: trust },
+      select: { id: true, store_name: true, trust_status: true },
     });
   }
 
@@ -297,6 +308,62 @@ export class AdminService {
         ordersByStatus: orderMap(sellerOrderGrouped),
         recentProducts,
         recentSales,
+      },
+    };
+  }
+
+  // ─── 360° product details (ảnh, shop, tồn kho, đơn giá, thống kê bán) ─────
+  async productDetails(id: string) {
+    const product = await this.db.product.findUnique({
+      where: { id },
+      select: {
+        id: true,
+        name: true,
+        description: true,
+        reference_price: true,
+        stock_quantity: true,
+        unit: true,
+        location: true,
+        certification: true,
+        min_negotiation_qty: true,
+        status: true,
+        is_active: true,
+        created_at: true,
+        updated_at: true,
+        seller: {
+          select: {
+            id: true,
+            full_name: true,
+            email: true,
+            profile: { select: { store_name: true, address: true, is_verified: true } },
+          },
+        },
+        category: { select: { id: true, name: true } },
+      },
+    });
+    if (!product) throw new NotFoundException('Sản phẩm không tồn tại.');
+
+    const [images, soldAgg, timesOrdered] = await Promise.all([
+      this.db.attachment.findMany({
+        where: { target_id: id, target_type: 'PRODUCT' },
+        select: { url: true },
+        orderBy: { created_at: 'asc' },
+      }),
+      this.db.orderItem.aggregate({
+        _sum: { quantity: true },
+        _count: { _all: true },
+        where: { product_id: id, order: { status: OrderStatus.COMPLETED } },
+      }),
+      this.db.orderItem.count({ where: { product_id: id } }),
+    ]);
+
+    return {
+      product,
+      images: images.map((a) => a.url),
+      stats: {
+        soldQuantity: Number(soldAgg._sum.quantity ?? 0),
+        completedOrderItems: soldAgg._count._all,
+        timesOrdered,
       },
     };
   }

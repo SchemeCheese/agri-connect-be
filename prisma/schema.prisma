@@ -116,6 +116,15 @@ enum ResolutionAction {
   CLOSE_WITHOUT_ACTION // Đóng, giữ nguyên
 }
 
+// Mức độ tin cậy của shop (do Admin điều chỉnh). KHÔNG expose số report/dispute thô
+// ra buyer — chỉ phơi trust_status / is_verified ở public API.
+enum TrustStatus {
+  VERIFIED // Shop uy tín, đã xác minh
+  NORMAL // Mặc định
+  WARNING // Đang bị cảnh báo (nhiều khiếu nại)
+  RESTRICTED // Bị hạn chế hoạt động
+}
+
 // --- Các Model chính ---
 
 model User {
@@ -171,16 +180,17 @@ model User {
 }
 
 model Profile {
-  id          String   @id @default(cuid())
-  user_id     String   @unique
-  user        User     @relation(fields: [user_id], references: [id])
-  store_name  String?
-  address     String?
-  description String?  @db.Text
-  is_verified Boolean  @default(false)
-  cover_url   String? // Ảnh bìa của shop
-  banners1    String[] @default([]) // Banner dưới thông tin shop (tối đa 6 ảnh)
-  banners2    String[] @default([]) // Banner dưới "Gợi ý cho bạn" (tối đa 6 ảnh)
+  id           String      @id @default(cuid())
+  user_id      String      @unique
+  user         User        @relation(fields: [user_id], references: [id])
+  store_name   String?
+  address      String?
+  description  String?     @db.Text
+  is_verified  Boolean     @default(false)
+  trust_status TrustStatus @default(NORMAL) // Do Admin điều chỉnh; expose ra public
+  cover_url    String? // Ảnh bìa của shop
+  banners1     String[]    @default([]) // Banner dưới thông tin shop (tối đa 6 ảnh)
+  banners2     String[]    @default([]) // Banner dưới "Gợi ý cho bạn" (tối đa 6 ảnh)
 
   // ─── Shop location / Google Maps ────────────────────────────────────────
   shop_location_name   String? // Friendly label, e.g. "Nông trại Đà Lạt"
@@ -391,6 +401,8 @@ model Review {
   seller_reply      String?   @db.Text
   seller_replied_at DateTime?
   created_at        DateTime  @default(now())
+
+  @@unique([order_id, reviewer_id]) // Chống đánh giá trùng: 1 review / (đơn, người đánh giá)
 }
 
 model Attachment {

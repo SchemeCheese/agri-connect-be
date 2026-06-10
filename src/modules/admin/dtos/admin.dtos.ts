@@ -1,5 +1,10 @@
 import { IsArray, IsBoolean, IsEnum, IsIn, IsOptional, IsString, MinLength } from 'class-validator';
-import { DisputeOutcome, ResolutionAction } from '@prisma/client';
+import { DisputeOutcome, ResolutionAction, TrustStatus } from '@prisma/client';
+
+export class SetTrustStatusDto {
+  @IsEnum(TrustStatus)
+  trust_status: TrustStatus;
+}
 
 // ─── Governance ──────────────────────────────────────────────────────────────
 export class SetUserStatusDto {
