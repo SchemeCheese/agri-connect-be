@@ -1,4 +1,5 @@
 import { BadRequestException, Body, Controller, Get, Param, Post, Query, Redirect, Request, UseGuards } from '@nestjs/common';
+import { SkipThrottle } from '@nestjs/throttler';
 import { PaymentsService } from './payments.service';
 import { MomoCreateDto } from './dtos/momo-create.dto';
 import { AuthGuard } from '@nestjs/passport';
@@ -18,7 +19,9 @@ export class PaymentsController {
     return this.paymentsService.createMomoPayment(req.user.sub, id);
   }
 
-  // MoMo gọi IPN (notify) — server-to-server POST
+  // MoMo gọi IPN (notify) — server-to-server POST. Miễn rate-limit (webhook ngoài,
+  // idempotent theo momo_trans_id) để không bị 429 chặn callback thanh toán.
+  @SkipThrottle()
   @Post('momo/ipn')
   async momoIpn(@Body() body: any) {
     return this.paymentsService.handleMomoIpn(body);
@@ -26,6 +29,8 @@ export class PaymentsController {
 
   // FE polling trên trang /payment/success — PUBLIC (không JWT), chỉ trả { status }.
   // Không lộ thông tin nhạy cảm; dùng để biết IPN của MoMo đã về hay chưa.
+  // FE poll liên tục khi chờ IPN → miễn rate-limit (read-only, không nhạy cảm).
+  @SkipThrottle()
   @Get('status/:orderId')
   async paymentStatus(@Param('orderId') orderId: string) {
     return this.paymentsService.getPaymentStatus(orderId);

@@ -1,6 +1,8 @@
 import { Module } from '@nestjs/common';
+import { APP_GUARD } from '@nestjs/core';
 import { ConfigModule } from '@nestjs/config';
 import { ScheduleModule } from '@nestjs/schedule';
+import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { DatabaseModule } from './database/database.module';
@@ -23,6 +25,9 @@ import { AdminModule } from './modules/admin/admin.module';
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
     ScheduleModule.forRoot(),
+    // Rate limit mặc định: 20 request / 60s cho MỖI route, theo IP. Endpoint nhạy
+    // cảm (login, OTP, checkout, review) bị siết chặt hơn bằng @Throttle tại handler.
+    ThrottlerModule.forRoot([{ ttl: 60000, limit: 20 }]),
     DatabaseModule,
     AuthModule,
     ProductsModule,
@@ -40,6 +45,7 @@ import { AdminModule } from './modules/admin/admin.module';
     AdminModule,
   ],
   controllers: [AppController],
-  providers: [AppService],
+  // ThrottlerGuard toàn cục → mọi route được rate-limit (mặc định 20/60s/route/IP).
+  providers: [AppService, { provide: APP_GUARD, useClass: ThrottlerGuard }],
 })
 export class AppModule {}

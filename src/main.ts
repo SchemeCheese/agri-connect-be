@@ -21,6 +21,9 @@ if (process.env.RAILWAY_DATABASE_URL && !process.env.DATABASE_URL) {
 
 async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule);
+  // Sau proxy Railway, IP client nằm ở X-Forwarded-For. Bật trust proxy để
+  // ThrottlerGuard rate-limit theo IP THẬT (nếu không, mọi user chung 1 IP proxy).
+  app.set('trust proxy', 1);
   const port = Number(process.env.PORT) || 3001;
 
   // Allowlist CORS: LUÔN cho phép FE local (dev) + FE Vercel (demo), CỘNG thêm bất

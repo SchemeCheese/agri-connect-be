@@ -139,7 +139,7 @@ export class DisputeService {
   }
 
   // ─── ADMIN: phán quyết (quyền tối hậu) ───────────────────────────────────
-  async adjudicate(_adminId: string, id: string, dto: AdjudicateDto) {
+  async adjudicate(adminId: string, id: string, dto: AdjudicateDto) {
     const dispute = await this.db.dispute.findUnique({
       where: { id },
       include: { order: { include: { payments: true, order_items: { select: { product_id: true, quantity: true } } } } },
@@ -230,6 +230,25 @@ export class DisputeService {
         );
       }
     }
+
+    // Audit trail (best-effort): ghi nhận phán quyết của admin ngay sau khi xử lý xong.
+    await this.db.auditLog
+      .create({
+        data: {
+          admin_id: adminId,
+          action: 'RESOLVE_DISPUTE',
+          target_id: id,
+          details: {
+            order_id: dispute.order_id,
+            outcome: dto.outcome,
+            action_taken: dto.action_taken,
+            admin_notes: dto.admin_notes ?? null,
+            order_status: newOrderStatus,
+            refund_triggered: isRefundAction && hasOnlinePaid,
+          } as Prisma.InputJsonValue,
+        },
+      })
+      .catch(() => undefined);
 
     return this.getById(id);
   }

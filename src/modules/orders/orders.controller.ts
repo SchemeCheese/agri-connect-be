@@ -1,4 +1,5 @@
 import { Controller, Post, Patch, Body, UseGuards, Request, Get, Param, ForbiddenException, BadRequestException } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import { PaymentMethod } from '@prisma/client';
 import { OrdersService } from './orders.service';
 import { PaymentsService } from '../payments/payments.service';
@@ -22,6 +23,8 @@ export class OrdersController {
     ) { }
 
     // ─── BUYER: Đặt hàng ─────────────────────────────────────────────────────
+    // Tạo đơn: 5 request / phút / IP (chống spam tạo đơn / lạm dụng trừ kho).
+    @Throttle({ default: { limit: 5, ttl: 60000 } })
     @UseGuards(RolesGuard)
     @Roles(UserRole.BUYER)
     @Post('checkout')
@@ -30,6 +33,7 @@ export class OrdersController {
     }
 
     // ─── BUYER: Thanh toán quote ngay trong chat ───────────────────────────
+    @Throttle({ default: { limit: 5, ttl: 60000 } })
     @UseGuards(RolesGuard)
     @Roles(UserRole.BUYER)
     @Post('checkout-quote')

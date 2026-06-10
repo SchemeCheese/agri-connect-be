@@ -1,4 +1,5 @@
 import { Controller, Post, Get, Patch, Body, Param, Query, UseGuards, Request } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import { ReviewsService } from './reviews.service';
 import { CreateReviewDto } from './dtos/create-review.dto';
 import { ReplyReviewDto } from './dtos/reply-review.dto';
@@ -12,7 +13,8 @@ import { UserRole } from '../auth/decorators/roles.decorator';
 export class ReviewsController {
   constructor(private readonly reviewsService: ReviewsService) {}
 
-  // POST /reviews — Buyer tạo đánh giá (chỉ sau khi đơn COMPLETED)
+  // POST /reviews — Buyer tạo đánh giá (chỉ sau khi đơn COMPLETED). 3 req/phút/IP.
+  @Throttle({ default: { limit: 3, ttl: 60000 } })
   @UseGuards(RolesGuard)
   @Roles(UserRole.BUYER)
   @Post()

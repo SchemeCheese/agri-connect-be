@@ -11,6 +11,23 @@ const num = (v: string | undefined, def: number) => {
 export class AdminService {
   constructor(private readonly db: DatabaseService) {}
 
+  // Ghi nhật ký hành động quản trị (audit trail). Best-effort: nuốt lỗi để KHÔNG
+  // làm hỏng hành động nghiệp vụ nếu ghi log thất bại.
+  async writeAudit(adminId: string, action: string, targetId: string, details?: Record<string, unknown>) {
+    try {
+      await this.db.auditLog.create({
+        data: {
+          admin_id: adminId,
+          action,
+          target_id: targetId,
+          ...(details ? { details: details as Prisma.InputJsonValue } : {}),
+        },
+      });
+    } catch {
+      // best-effort — bỏ qua lỗi ghi audit
+    }
+  }
+
   // ─── Dashboard analytics ─────────────────────────────────────────────────
   async dashboard() {
     const [totalUsers, buyers, sellers, admins, activeProducts, totalProducts, completedOrders, totalOrders, pendingShops, openDisputes] =

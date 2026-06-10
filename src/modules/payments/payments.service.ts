@@ -273,9 +273,13 @@ export class PaymentsService {
 
     const expected = this.signMomoRequest(rawSignature, secretKey);
     if (expected !== ipn.signature) {
-      this.logger.error(`MoMo IPN signature mismatch. payload=${JSON.stringify(ipn)} rawSignature=${rawSignature} expected=${expected}`);
+      // SecOps trace: chỉ log orderId/transId (không dump toàn payload/signature nhạy cảm).
+      this.logger.error(
+        `[MoMo IPN] SIGNATURE MISMATCH — orderId=${ipn.orderId} transId=${ipn.transId} resultCode=${ipn.resultCode}. Webhook bị từ chối.`,
+      );
       throw new BadRequestException('Invalid signature');
     }
+    this.logger.log(`[MoMo IPN] signature OK — orderId=${ipn.orderId} transId=${ipn.transId}`);
 
     // ipn.orderId IS the CheckoutSession id (or legacy order id).
     // Early idempotency check: if already PAID, return immediately (prevent duplicate processing).
@@ -294,6 +298,13 @@ export class PaymentsService {
       }
 
       await this.markMomoPaid(ipn.orderId, String(ipn.transId));
+      this.logger.log(
+        `[MoMo IPN] ✅ Đã xác thực & ghi nhận THANH TOÁN — orderId=${ipn.orderId} transId=${ipn.transId} amount=${ipn.amount}`,
+      );
+    } else {
+      this.logger.warn(
+        `[MoMo IPN] resultCode=${ipn.resultCode} (KHÔNG thành công) — orderId=${ipn.orderId} transId=${ipn.transId}. Không đổi trạng thái.`,
+      );
     }
 
     return { resultCode: 0, message: 'OK' };
@@ -774,6 +785,10 @@ export class PaymentsService {
       });
     });
 
+    this.logger.log(
+      `[MoMo Refund] ✅ Hoàn tiền thành công — orderId=${orderId} origTransId=${payment.transaction_ref} ` +
+        `refundTransId=${data.transId ?? refundOrderId} amount=${refundAmount}`,
+    );
     return {
       message: 'Hoàn tiền MoMo thành công.',
       refundTransId: data.transId,

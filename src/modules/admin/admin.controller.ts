@@ -35,8 +35,13 @@ export class AdminController {
   }
 
   @Patch('users/:id/status')
-  setUserStatus(@Param('id') id: string, @Body() dto: SetUserStatusDto) {
-    return this.admin.setUserStatus(id, dto.is_active);
+  async setUserStatus(@Request() req, @Param('id') id: string, @Body() dto: SetUserStatusDto) {
+    const result = await this.admin.setUserStatus(id, dto.is_active);
+    await this.admin.writeAudit(req.user.sub, dto.is_active ? 'ACTIVATE_USER' : 'SUSPEND_USER', id, {
+      is_active: dto.is_active,
+      reason: dto.reason ?? null,
+    });
+    return result;
   }
 
   // ─── Seller / shop approval ────────────────────────────────────────────
@@ -46,13 +51,19 @@ export class AdminController {
   }
 
   @Patch('shops/:userId/verify')
-  verifyShop(@Param('userId') userId: string, @Body() dto: VerifyShopDto) {
-    return this.admin.verifyShop(userId, dto.is_verified);
+  async verifyShop(@Request() req, @Param('userId') userId: string, @Body() dto: VerifyShopDto) {
+    const result = await this.admin.verifyShop(userId, dto.is_verified);
+    await this.admin.writeAudit(req.user.sub, dto.is_verified ? 'APPROVE_SELLER' : 'UNVERIFY_SELLER', userId, {
+      is_verified: dto.is_verified,
+    });
+    return result;
   }
 
   @Patch('shops/:userId/trust-status')
-  setShopTrust(@Param('userId') userId: string, @Body() dto: SetTrustStatusDto) {
-    return this.admin.setShopTrust(userId, dto.trust_status);
+  async setShopTrust(@Request() req, @Param('userId') userId: string, @Body() dto: SetTrustStatusDto) {
+    const result = await this.admin.setShopTrust(userId, dto.trust_status);
+    await this.admin.writeAudit(req.user.sub, 'SET_TRUST_STATUS', userId, { trust_status: dto.trust_status });
+    return result;
   }
 
   // ─── Product moderation ─────────────────────────────────────────────────
@@ -72,8 +83,13 @@ export class AdminController {
   }
 
   @Patch('products/:id/moderation')
-  moderateProduct(@Param('id') id: string, @Body() dto: ModerateProductDto) {
-    return this.admin.moderateProduct(id, dto.status, dto.reason);
+  async moderateProduct(@Request() req, @Param('id') id: string, @Body() dto: ModerateProductDto) {
+    const result = await this.admin.moderateProduct(id, dto.status, dto.reason);
+    await this.admin.writeAudit(req.user.sub, 'MODERATE_PRODUCT', id, {
+      status: dto.status,
+      reason: dto.reason ?? null,
+    });
+    return result;
   }
 
   // ─── Disputes (admin view + phán quyết) ──────────────────────────────────

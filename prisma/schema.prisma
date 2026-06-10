@@ -237,6 +237,7 @@ model Product {
   // Index hỗ trợ AI tools (search_products, recommend_sellers) — ILIKE/contains trên name
   @@index([is_active, name])
   @@index([is_active, category_id])
+  @@index([is_active])
   @@index([seller_id])
 }
 
@@ -584,4 +585,18 @@ model Dispute {
 
   @@index([status])
   @@index([order_id])
+}
+
+// ─── Audit trail cho hành động quản trị (RESOLVE_DISPUTE, SUSPEND_SELLER, ...) ──
+model AuditLog {
+  id         String   @id @default(cuid())
+  admin_id   String // User.id của admin thực hiện (không FK cứng để giữ log khi user đổi)
+  action     String // "RESOLVE_DISPUTE" | "SUSPEND_SELLER" | "REFUND_ORDER" | ...
+  target_id  String // id của User/Order/Dispute bị tác động
+  details    Json? // snapshot ngữ cảnh hành động (outcome, lý do, before/after...)
+  created_at DateTime @default(now())
+
+  @@index([admin_id, created_at])
+  @@index([target_id])
+  @@index([action, created_at])
 }

@@ -1,4 +1,5 @@
 import { Controller, Post, Body, UseGuards, Request } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import { AuthService } from './auth.service';
 import { RegisterDto } from './dtos/register.dto';
 import { LoginDto } from './dtos/login.dto';
@@ -11,11 +12,15 @@ import { JwtAuthGuard } from './decorators/guards/jwt-auth.guard';
 export class AuthController {
   constructor(private readonly authService: AuthService) {}
 
+  // Gửi OTP qua đăng ký: 5 request / 5 phút / IP (chống spam OTP/email).
+  @Throttle({ default: { limit: 5, ttl: 300000 } })
   @Post('register')
   register(@Body() dto: RegisterDto) {
     return this.authService.register(dto);
   }
 
+  // Đăng nhập: 5 request / 5 phút / IP (chống brute-force mật khẩu).
+  @Throttle({ default: { limit: 5, ttl: 300000 } })
   @Post('login')
   login(@Body() dto: LoginDto) {
     return this.authService.login(dto);
