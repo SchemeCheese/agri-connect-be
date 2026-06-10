@@ -1,286 +1,717 @@
-import { PrismaClient, OrderStatus, TargetType } from '@prisma/client';
+/**
+ * ============================================================================
+ *  Agri Connect — SEED DỮ LIỆU DEMO (idempotent, an toàn với dữ liệu thật)
+ * ============================================================================
+ *
+ *  TRIẾT LÝ:
+ *   - KHÔNG `prisma migrate reset`, KHÔNG xoá toàn bộ bảng.
+ *   - Chỉ tạo/xoá các bản ghi mang dấu hiệu SEED:
+ *       • User      : email bắt đầu bằng  "seed."        (SEED_EMAIL_PREFIX)
+ *       • Product   : name  bắt đầu bằng  "[SEED] "      (SEED_NAME_PREFIX)
+ *   - Mọi entity phụ thuộc (Order, Payment, Review, Voucher, Conversation, ...)
+ *     đều thuộc về các seed user nói trên ⇒ dữ liệu thật của bạn KHÔNG bị đụng.
+ *   - Chạy lại nhiều lần ⇒ "Cleanup Phase" xoá sạch seed cũ rồi tạo lại ⇒ tổng
+ *     số bản ghi cuối cùng luôn GIỐNG NHAU, không bao giờ vướng Unique Constraint.
+ *
+ *  BỎ QUA OTP: mọi seed user có verified_email = true ⇒ login thẳng, không cần
+ *  mã OTP. KHÔNG đụng vào auth.service.ts, KHÔNG tắt OTP toàn cục.
+ *
+ *  ĐĂNG NHẬP DEMO:  seed.buyer01@agriconnect.test  /  Seed@123456
+ * ============================================================================
+ */
+
+import {
+  PrismaClient,
+  OrderStatus,
+  PaymentStatus,
+  PaymentMethod,
+  PaymentType,
+  DiscountType,
+  MessageType,
+  QuoteStatus,
+  ProductStatus,
+  BehaviorAction,
+  TargetType,
+} from '@prisma/client';
 import * as bcrypt from 'bcrypt';
 
 const prisma = new PrismaClient();
 
-// ==========================================
-// DATA: DANH MỤC
-// ==========================================
-const CATEGORIES = [
-  { id: 'trai-cay', name: 'Trái cây' },
-  { id: 'rau-cu', name: 'Rau củ' },
-  { id: 'ngu-coc', name: 'Ngũ cốc' },
-  { id: 'gia-vi', name: 'Gia vị' },
-  { id: 'khac', name: 'Khác' },
+// ─── Hằng số nhận diện SEED ──────────────────────────────────────────────────
+const SEED_EMAIL_PREFIX = 'seed.';
+const SEED_NAME_PREFIX = '[SEED] ';
+const EMAIL_DOMAIN = '@agriconnect.test';
+const SEED_PASSWORD = 'Seed@123456';
+
+const N_BUYERS = 25;
+const N_SELLERS = 15;
+const N_HYBRIDS = 5; // vừa BUYER vừa SELLER
+const N_ORDERS = 80; // đơn hàng "thường" (chưa tính đơn từ thương lượng)
+const N_NEGOTIATIONS = 5;
+
+// ─── Danh mục theo yêu cầu (KHÔNG xoá khi cleanup — có thể dùng chung dữ liệu thật) ─
+const CATEGORY_NAMES = [
+  'Rau củ',
+  'Trái cây',
+  'Gạo & ngũ cốc',
+  'Thịt/Trứng/Sữa',
+  'Vật tư nông nghiệp',
+] as const;
+
+// Ảnh placeholder dùng chung (deterministic — cycle theo index)
+const IMAGE_POOL = [
+  'https://images.unsplash.com/photo-1542838132-92c53300491e?w=600&q=80',
+  'https://images.unsplash.com/photo-1488459716781-31db52582fe9?w=600&q=80',
+  'https://images.unsplash.com/photo-1518843875459-f738682238a6?w=600&q=80',
+  'https://images.unsplash.com/photo-1567306226416-28f0efdc88ce?w=600&q=80',
+  'https://images.unsplash.com/photo-1574323347407-f5e1ad6d020b?w=600&q=80',
 ];
 
-// ==========================================
-// DATA: SHOPS
-// ==========================================
-const SHOPS = [
-  { id: 'shop-1', userId: 'seller-shop-1', name: 'Nông Trại Cầu Đất', email: 'shop1@gmail.com', avatar: 'https://images.unsplash.com/photo-1605000797499-95a51c5269ae?w=200&h=200&fit=crop', location: 'TP. Đà Lạt, Lâm Đồng', desc: 'Chuyên Dâu tây & Rau củ' },
-  { id: 'shop-2', userId: 'seller-shop-2', name: 'Vựa Gạo Miền Tây', email: 'shop2@gmail.com', avatar: 'https://images.unsplash.com/photo-1586201375761-83865001e31c?w=200&h=200&fit=crop', location: 'TP. Cần Thơ', desc: 'Gạo ngon ST25' },
-  { id: 'shop-3', userId: 'seller-shop-3', name: 'Hạt Dinh Dưỡng Organic', email: 'shop3@gmail.com', avatar: 'https://images.unsplash.com/photo-1596040033229-a9821ebd058d?w=200&h=200&fit=crop', location: 'Bình Phước', desc: 'Hạt điều & Granola' },
-  { id: 'shop-4', userId: 'seller-shop-4', name: 'Thảo Mộc Tây Bắc', email: 'shop4@gmail.com', avatar: 'https://images.unsplash.com/photo-1615485925694-a039744c4b69?w=200&h=200&fit=crop', location: 'Sapa, Lào Cai', desc: 'Gia vị & Dược liệu' },
-  { id: 'shop-5', userId: 'seller-shop-5', name: 'Nông Sản Miền Núi', email: 'shop5@gmail.com', avatar: 'https://images.unsplash.com/photo-1501004318641-b39e6451bec6?w=200&h=200&fit=crop', location: 'Kon Tum', desc: 'Nông sản sạch miền núi' }
+// Pool sản phẩm theo từng danh mục: { name, price (VND), unit }
+// Giá hợp lý thị trường VN, từ 15.000đ đến 2.000.000đ.
+type ProdTpl = { name: string; price: number; unit: string };
+const PRODUCT_POOL: Record<string, ProdTpl[]> = {
+  'Rau củ': [
+    { name: 'Cải ngọt hữu cơ', price: 22000, unit: 'kg' },
+    { name: 'Rau muống sạch', price: 15000, unit: 'bó' },
+    { name: 'Cà chua bi Đà Lạt', price: 45000, unit: 'kg' },
+    { name: 'Cà rốt Đà Lạt', price: 25000, unit: 'kg' },
+    { name: 'Súp lơ xanh', price: 55000, unit: 'kg' },
+    { name: 'Khoai tây vàng', price: 35000, unit: 'kg' },
+    { name: 'Dưa leo baby', price: 30000, unit: 'kg' },
+    { name: 'Bí đỏ hồ lô', price: 28000, unit: 'kg' },
+    { name: 'Ớt chuông đỏ', price: 70000, unit: 'kg' },
+    { name: 'Hành lá', price: 40000, unit: 'kg' },
+  ],
+  'Trái cây': [
+    { name: 'Xoài cát Hòa Lộc', price: 95000, unit: 'kg' },
+    { name: 'Sầu riêng Ri6', price: 180000, unit: 'kg' },
+    { name: 'Bơ sáp 034', price: 80000, unit: 'kg' },
+    { name: 'Dâu tây Đà Lạt', price: 120000, unit: 'kg' },
+    { name: 'Cam sành miền Tây', price: 30000, unit: 'kg' },
+    { name: 'Bưởi da xanh', price: 45000, unit: 'kg' },
+    { name: 'Thanh long ruột đỏ', price: 40000, unit: 'kg' },
+    { name: 'Nhãn lồng Hưng Yên', price: 60000, unit: 'kg' },
+    { name: 'Vải thiều Lục Ngạn', price: 55000, unit: 'kg' },
+    { name: 'Nho đen không hạt', price: 150000, unit: 'kg' },
+  ],
+  'Gạo & ngũ cốc': [
+    { name: 'Gạo ST25 túi 5kg', price: 180000, unit: 'túi' },
+    { name: 'Gạo lứt đỏ Điện Biên', price: 50000, unit: 'kg' },
+    { name: 'Yến mạch nguyên hạt', price: 90000, unit: 'kg' },
+    { name: 'Đậu xanh tách vỏ', price: 48000, unit: 'kg' },
+    { name: 'Đậu đen xanh lòng', price: 45000, unit: 'kg' },
+    { name: 'Mè đen rang', price: 65000, unit: 'kg' },
+    { name: 'Hạt sen khô', price: 220000, unit: 'kg' },
+    { name: 'Ngô ngọt (bắp)', price: 15000, unit: 'kg' },
+    { name: 'Gạo nếp cái hoa vàng', price: 40000, unit: 'kg' },
+    { name: 'Hạt Quinoa diêm mạch', price: 250000, unit: 'kg' },
+  ],
+  'Thịt/Trứng/Sữa': [
+    { name: 'Trứng gà ta vỉ 10', price: 35000, unit: 'vỉ' },
+    { name: 'Trứng vịt vỉ 10', price: 38000, unit: 'vỉ' },
+    { name: 'Thịt heo sạch ba chỉ', price: 140000, unit: 'kg' },
+    { name: 'Gà ta thả vườn', price: 130000, unit: 'kg' },
+    { name: 'Sữa bò tươi thanh trùng', price: 35000, unit: 'lít' },
+    { name: 'Trứng cút lộn', price: 25000, unit: 'chục' },
+    { name: 'Sữa dê tươi', price: 60000, unit: 'lít' },
+    { name: 'Thịt bò bắp', price: 280000, unit: 'kg' },
+    { name: 'Cá lóc đồng', price: 90000, unit: 'kg' },
+    { name: 'Gà ác nguyên con', price: 110000, unit: 'con' },
+  ],
+  'Vật tư nông nghiệp': [
+    { name: 'Phân bón hữu cơ bao 25kg', price: 250000, unit: 'bao' },
+    { name: 'Hạt giống rau cải gói', price: 18000, unit: 'gói' },
+    { name: 'Phân trùn quế bao 20kg', price: 120000, unit: 'bao' },
+    { name: 'Lưới che nắng cuộn 50m', price: 320000, unit: 'cuộn' },
+    { name: 'Thuốc trừ sâu sinh học', price: 85000, unit: 'chai' },
+    { name: 'Màng phủ nông nghiệp cuộn', price: 400000, unit: 'cuộn' },
+    { name: 'Giá thể trồng cây bao 50L', price: 95000, unit: 'bao' },
+    { name: 'Bình phun tay 16L', price: 280000, unit: 'cái' },
+    { name: 'Máy phun thuốc động cơ', price: 2000000, unit: 'cái' },
+    { name: 'Dây buộc cây cuộn', price: 35000, unit: 'cuộn' },
+  ],
+};
+
+const REVIEW_COMMENTS = [
+  'Hàng đóng gói cẩn thận, nông sản tươi ngon. Sẽ ủng hộ shop dài dài!',
+  'Giao nhanh, sản phẩm đúng mô tả, rất hài lòng.',
+  'Rau củ tươi, không dập nát. Shop tư vấn nhiệt tình.',
+  'Chất lượng tốt, giá hợp lý, đóng gói chắc chắn.',
+  'Mua lần 2 rồi, vẫn ngon như lần đầu. Recommend!',
+  'Sản phẩm sạch, an toàn cho gia đình. Cảm ơn shop.',
+];
+const SELLER_REPLIES = [
+  'Cảm ơn anh/chị đã tin tưởng shop ạ! Hẹn gặp lại đơn sau ❤️',
+  'Shop cảm ơn đánh giá 5 sao của mình nhé!',
+  'Rất vui khi sản phẩm làm hài lòng anh/chị ạ.',
 ];
 
-// ==========================================
-// DATA: PRODUCTS
-// ==========================================
-const PRODUCTS = [
-  // --- TRÁI CÂY ---
-  {
-    id: 'tc-1', name: 'Dâu tây Đà Lạt', price: 120000, category: 'trai-cay', origin: 'da-lat', shopId: 'shop-1', stock: 50, images: [
-      'https://images.unsplash.com/photo-1587393855524-087f83d95bc9?q=80&w=920&auto=format&fit=crop',
-      'https://images.unsplash.com/photo-1622143365323-b6f297a72df3?q=80&w=870&auto=format&fit=crop',
-      'https://images.unsplash.com/photo-1588165171080-c89acfa5ee83?q=80&w=687&auto=format&fit=crop',
-      'https://images.unsplash.com/photo-1648141294431-1f1d49becd1a?q=80&w=687&auto=format&fit=crop',
-      'https://images.unsplash.com/photo-1543156426-0fe5c9dba474?q=80&w=870&auto=format&fit=crop',
-      'https://images.unsplash.com/photo-1716209290705-7333e99e3434?q=80&w=870&auto=format&fit=crop'
-    ], description: 'Dâu tây tươi ngon, đỏ mọng, vị ngọt thanh.'
-  },
-
-  {
-    id: 'tc-2', name: 'Bơ sáp 034', price: 80000, category: 'trai-cay', origin: 'da-lat', shopId: 'shop-1', stock: 100, images: [
-      'https://images.unsplash.com/photo-1653819370651-e5d283ec84aa?q=80&w=1160&auto=format&fit=crop',
-      'https://images.unsplash.com/photo-1612215047504-a6c07dbe4f7f?q=80&w=1740&auto=format&fit=crop&ixlib=rb-4.1.0&ixid=M3wxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8fA%3D%3D',
-      'https://images.unsplash.com/photo-1580823673284-e911e30564b6?q=80&w=1740&auto=format&fit=crop&ixlib=rb-4.1.0&ixid=M3wxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8fA%3D%3D',
-      'https://images.unsplash.com/photo-1580823673202-ef0405ae5b52?q=80&w=1740&auto=format&fit=crop&ixlib=rb-4.1.0&ixid=M3wxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8fA%3D%3D',
-      'https://images.unsplash.com/photo-1616485828923-2640a1ee48b4?q=80&w=1740&auto=format&fit=crop&ixlib=rb-4.1.0&ixid=M3wxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8fA%3D%3D',
-      'https://images.unsplash.com/photo-1691657915865-d7b9a6a54e6f?q=80&w=1374&auto=format&fit=crop&ixlib=rb-4.1.0&ixid=M3wxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8fA%3D%3D',
-      'https://images.unsplash.com/photo-1741515045437-97682aa96a2d?q=80&w=1740&auto=format&fit=crop&ixlib=rb-4.1.0&ixid=M3wxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8fA%3D%3D'
-    ], description: 'Bơ sáp dẻo quánh, béo ngậy, hạt nhỏ. Đặc sản Lâm Đồng.'
-  },
-
-  {
-    id: 'tc-3', name: 'Xoài cát Hòa Lộc', price: 95000, category: 'trai-cay', origin: 'mien-tay', shopId: 'shop-2', stock: 40, images: [
-      'https://images.unsplash.com/photo-1553279768-865429fa0078?w=600&q=80',
-      'https://images.unsplash.com/photo-1601493700631-2b16ec4b4716?q=80&w=870&auto=format&fit=crop&ixlib=rb-4.1.0&ixid=M3wxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8fA%3D%3D',
-      'https://images.unsplash.com/photo-1635716279493-d1e30afc25a0?q=80&w=1740&auto=format&fit=crop&ixlib=rb-4.1.0&ixid=M3wxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8fA%3D%3D',
-      'https://images.unsplash.com/photo-1582655299221-2b6bff351df0?q=80&w=1162&auto=format&fit=crop&ixlib=rb-4.1.0&ixid=M3wxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8fA%3D%3D',
-      'https://images.unsplash.com/photo-1669207334420-66d0e3450283?q=80&w=687&auto=format&fit=crop&ixlib=rb-4.1.0&ixid=M3wxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8fA%3D%3D',
-      'https://images.unsplash.com/photo-1605027990121-cbae9e0642df?q=80&w=1740&auto=format&fit=crop&ixlib=rb-4.1.0&ixid=M3wxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8fA%3D%3D'
-    ], description: 'Xoài cát vỏ vàng, thịt ngọt lịm, thơm lừng.'
-  },
-
-  {
-    id: 'tc-4', name: 'Chuối già hương', price: 25000, category: 'trai-cay', origin: 'mien-tay', shopId: 'shop-2', stock: 500, images: [
-      'https://images.unsplash.com/photo-1571771894821-ce9b6c11b08e?w=600&q=80',
-      'https://images.unsplash.com/photo-1528825871115-3581a5387919?q=80&w=830&auto=format&fit=crop&ixlib=rb-4.1.0&ixid=M3wxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8fA%3D%3D',
-      'https://images.unsplash.com/photo-1587920523737-556db3c49174?q=80&w=870&auto=format&fit=crop&ixlib=rb-4.1.0&ixid=M3wxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8fA%3D%3D',
-      'https://images.unsplash.com/photo-1571771894821-ce9b6c11b08e?q=80&w=1160&auto=format&fit=crop&ixlib=rb-4.1.0&ixid=M3wxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8fA%3D%3D',
-      'https://images.unsplash.com/photo-1676495706102-ca1be8fdf676?q=80&w=1630&auto=format&fit=crop&ixlib=rb-4.1.0&ixid=M3wxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8fA%3D%3D',
-      'https://images.unsplash.com/photo-1580750587717-115f648f5402?q=80&w=1740&auto=format&fit=crop&ixlib=rb-4.1.0&ixid=M3wxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8fA%3D%3D',
-    ], description: 'Chuối già hương chín cây, giàu năng lượng.'
-  },
-  {
-    id: 'tc-5', name: 'Dưa hấu đỏ', price: 15000, category: 'trai-cay', origin: 'mien-tay', shopId: 'shop-2', stock: 50, images: [
-      'https://images.unsplash.com/photo-1587049352846-4a222e784d38?w=600&q=80',
-      'https://images.unsplash.com/photo-1563114773-84221bd62daa?q=80&w=1740&auto=format&fit=crop&ixlib=rb-4.1.0&ixid=M3wxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8fA%3D%3D',
-      'https://images.unsplash.com/photo-1622208489373-1fe93e2c6720?q=80&w=1740&auto=format&fit=crop&ixlib=rb-4.1.0&ixid=M3wxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8fA%3D%3D',
-      'https://images.unsplash.com/photo-1630081015918-8a21078e5cee?q=80&w=930&auto=format&fit=crop&ixlib=rb-4.1.0&ixid=M3wxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8fA%3D%3D',
-      'https://images.unsplash.com/photo-1708982553355-794739c6693e?q=80&w=1825&auto=format&fit=crop&ixlib=rb-4.1.0&ixid=M3wxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8fA%3D%3D'
-    ], description: 'Dưa hấu giải nhiệt, ruột đỏ cát, ngọt mát.'
-  },
-
-  {
-    id: 'tc-6', name: 'Cam sành vắt nước', price: 30000, category: 'trai-cay', origin: 'mien-tay', shopId: 'shop-2', stock: 200, images: [
-      'https://images.unsplash.com/photo-1611080626919-7cf5a9dbab5b?w=600&q=80',
-      'https://images.unsplash.com/photo-1597714026720-8f74c62310ba?q=80&w=1740&auto=format&fit=crop&ixlib=rb-4.1.0&ixid=M3wxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8fA%3D%3D',
-      'https://images.unsplash.com/photo-1547514701-42782101795e?q=80&w=687&auto=format&fit=crop&ixlib=rb-4.1.0&ixid=M3wxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8fA%3D%3D',
-      'https://images.unsplash.com/photo-1586439702132-55ce0da661dd?q=80&w=928&auto=format&fit=crop&ixlib=rb-4.1.0&ixid=M3wxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8fA%3D%3D',
-      'https://images.unsplash.com/photo-1605986723344-f60873d873fa?q=80&w=656&auto=format&fit=crop&ixlib=rb-4.1.0&ixid=M3wxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8fA%3D%3D',
-    ], description: 'Cam mọng nước, nhiều vitamin C, tốt cho sức khỏe.'
-  },
-
-  {
-    id: 'tc-7', name: 'Nho đen không hạt', price: 150000, category: 'trai-cay', origin: 'nhap-khau', shopId: 'shop-4', stock: 30, images: [
-      'https://images.unsplash.com/photo-1516876319496-d5a849a2e89b?q=80&w=1160'
-    ], description: 'Nho đen giòn ngọt, chùm to, không hạt. Nhập khẩu Mỹ.'
-  },
-
-  {
-    id: 'tc-8', name: 'Táo Envy', price: 110000, category: 'trai-cay', origin: 'nhap-khau', shopId: 'shop-4', stock: 40, images: [
-      'https://images.unsplash.com/photo-1560806887-1e4cd0b6cbd6?w=600&q=80'
-    ], description: 'Táo nhập khẩu, giòn tan, vị ngọt đậm.'
-  },
-
-  // --- RAU CỦ ---
-  { id: 'rc-1', name: 'Xà lách thủy canh', price: 50000, category: 'rau-cu', origin: 'da-lat', shopId: 'shop-1', stock: 20, images: ['https://images.unsplash.com/photo-1622206151226-18ca2c9ab4a1?w=600&q=80'], description: 'Rau sạch thủy canh, an toàn, tươi mát.' },
-  { id: 'rc-2', name: 'Cà chua bi', price: 45000, category: 'rau-cu', origin: 'da-lat', shopId: 'shop-1', stock: 50, images: ['https://images.unsplash.com/photo-1561136594-7f68413baa99?w=600&q=80'], description: 'Cà chua nhỏ, giòn ngọt, thích hợp ăn sống.' },
-  { id: 'rc-3', name: 'Cà rốt Đà Lạt', price: 25000, category: 'rau-cu', origin: 'da-lat', shopId: 'shop-1', stock: 100, images: ['https://images.unsplash.com/photo-1598170845058-32b9d6a5da37?w=600&q=80'], description: 'Cà rốt củ to, màu cam đẹp, ngọt tự nhiên.' },
-  { id: 'rc-4', name: 'Súp lơ xanh', price: 55000, category: 'rau-cu', origin: 'da-lat', shopId: 'shop-1', stock: 30, images: ['https://images.unsplash.com/photo-1583663848850-46af132dc08e?w=600&q=80'], description: 'Bông cải xanh giàu chất xơ, tốt cho tiêu hóa.' },
-  { id: 'rc-5', name: 'Khoai tây vàng', price: 35000, category: 'rau-cu', origin: 'da-lat', shopId: 'shop-1', stock: 150, images: ['https://images.unsplash.com/photo-1518977676601-b53f82aba655?w=600&q=80'], description: 'Khoai tây bở, thích hợp nấu canh, chiên.' },
-  { id: 'rc-6', name: 'Ớt chuông đỏ', price: 70000, category: 'rau-cu', origin: 'da-lat', shopId: 'shop-1', stock: 40, images: ['https://images.unsplash.com/photo-1592548868664-f8b4e4b1cfb7?q=80&w=691'], description: 'Ớt chuông dày cơm, ngọt, không hăng.' },
-  { id: 'rc-7', name: 'Dưa leo Baby', price: 30000, category: 'rau-cu', origin: 'mien-tay', shopId: 'shop-2', stock: 100, images: ['https://images.unsplash.com/photo-1449300079323-02e209d9d3a6?w=600&q=80'], description: 'Dưa leo nhỏ, đặc ruột, giòn tan.' },
-  { id: 'rc-8', name: 'Hành tây tím', price: 28000, category: 'rau-cu', origin: 'da-lat', shopId: 'shop-1', stock: 80, images: ['https://images.unsplash.com/photo-1618512496248-a07fe83aa8cb?w=600&q=80'], description: 'Hành tây tím, vị hăng nhẹ, làm salad rất ngon.' },
-
-  // --- NGŨ CỐC ---
-  { id: 'nc-1', name: 'Gạo ST25', price: 180000, category: 'ngu-coc', origin: 'mien-tay', shopId: 'shop-2', stock: 500, images: ['https://images.unsplash.com/photo-1586201375761-83865001e31c?w=600&q=80'], description: 'Gạo ngon nhất thế giới, dẻo thơm.' },
-  { id: 'nc-2', name: 'Yến mạch nguyên hạt', price: 90000, category: 'ngu-coc', origin: 'nhap-khau', shopId: 'shop-3', stock: 50, images: ['https://images.unsplash.com/photo-1614373532018-92a75430a0da?q=80&w=687'], description: 'Yến mạch nhập khẩu, tốt cho tim mạch.' },
-  { id: 'nc-3', name: 'Đậu đen xanh lòng', price: 45000, category: 'ngu-coc', origin: 'tay-bac', shopId: 'shop-4', stock: 60, images: ['https://images.unsplash.com/photo-1543831113-c823c4a606b6?q=80&w=870'], description: 'Đậu đen hạt nhỏ, nấu chè bở tơi.' },
-  { id: 'nc-4', name: 'Ngô ngọt (Bắp)', price: 15000, category: 'ngu-coc', origin: 'mien-tay', shopId: 'shop-2', stock: 100, images: ['https://images.unsplash.com/photo-1551754655-cd27e38d2076?w=600&q=80'], description: 'Bắp ngô ngọt, hạt đều, luộc hay nướng đều ngon.' },
-  { id: 'nc-5', name: 'Hạt Quinoa (Diêm mạch)', price: 250000, category: 'ngu-coc', origin: 'nhap-khau', shopId: 'shop-3', stock: 20, images: ['https://images.unsplash.com/photo-1722882270052-e132567e9f70?q=80&w=808'], description: 'Siêu thực phẩm, giàu protein, thay thế cơm.' },
-  { id: 'nc-6', name: 'Gạo lứt đỏ', price: 50000, category: 'ngu-coc', origin: 'tay-bac', shopId: 'shop-4', stock: 100, images: ['https://images.unsplash.com/photo-1675150303909-1bb94e33132f?q=80&w=687'], description: 'Gạo lứt đỏ Điện Biên, dẻo, tốt cho người ăn kiêng.' },
-
-  // --- GIA VỊ ---
-  { id: 'gv-1', name: 'Tỏi cô đơn', price: 1200000, category: 'gia-vi', origin: 'mien-tay', shopId: 'shop-5', stock: 10, images: ['https://images.unsplash.com/photo-1620101680127-557e93569b1a?q=80&w=1325'], description: 'Tỏi một nhánh thơm nồng, dược tính cao.' },
-  { id: 'gv-2', name: 'Tiêu đen Phú Quốc', price: 220000, category: 'gia-vi', origin: 'mien-tay', shopId: 'shop-5', stock: 50, images: ['https://images.unsplash.com/photo-1596040033229-a9821ebd058d?w=600&q=80'], description: 'Hạt tiêu chắc, cay nồng đặc trưng.' },
-  { id: 'gv-3', name: 'Ớt bột Hàn Quốc', price: 150000, category: 'gia-vi', origin: 'nhap-khau', shopId: 'shop-5', stock: 30, images: ['https://images.unsplash.com/photo-1568481276363-88d890339390?q=80&w=870'], description: 'Ớt bột làm kim chi, màu đỏ đẹp, cay vừa.' },
-  { id: 'gv-4', name: 'Quế thanh', price: 180000, category: 'gia-vi', origin: 'tay-bac', shopId: 'shop-4', stock: 20, images: ['https://images.unsplash.com/photo-1611256243212-48a03787ea01?q=80&w=1754'], description: 'Quế thanh cạo vỏ, thơm ngọt, dùng nấu phở.' },
-  { id: 'gv-5', name: 'Gừng sẻ', price: 40000, category: 'gia-vi', origin: 'tay-bac', shopId: 'shop-4', stock: 40, images: ['https://images.unsplash.com/photo-1630623093145-f606591c2546?q=80&w=930'], description: 'Gừng củ nhỏ, cay nồng, ấm bụng.' },
-  { id: 'gv-6', name: 'Nghệ tươi', price: 30000, category: 'gia-vi', origin: 'khac', shopId: 'shop-4', stock: 50, images: ['https://images.unsplash.com/photo-1666818398897-381dd5eb9139?q=80&w=1748'], description: 'Nghệ vàng tươi, dùng kho cá hoặc làm đẹp.' },
-
-  // --- KHÁC ---
-  { id: 'kh-1', name: 'Mật ong rừng', price: 350000, category: 'khac', origin: 'tay-bac', shopId: 'shop-4', stock: 20, images: ['https://images.unsplash.com/photo-1642067958024-1a2d9f836920?q=80&w=1788'], description: 'Mật ong nguyên chất, sánh đặc.' },
-  { id: 'kh-2', name: 'Trà xanh Thái Nguyên', price: 200000, category: 'khac', origin: 'tay-bac', shopId: 'shop-4', stock: 60, images: ['https://images.unsplash.com/photo-1641997829221-a7d363722a1b?q=80&w=687'], description: 'Trà búp sao khô, nước xanh, vị chát hậu ngọt.' }
+const ADDRESSES = [
+  '12 Nguyễn Huệ, Quận 1, TP.HCM',
+  '45 Lê Lợi, Hải Châu, Đà Nẵng',
+  '88 Trần Phú, Ba Đình, Hà Nội',
+  '23 Hùng Vương, Ninh Kiều, Cần Thơ',
+  '7 Hai Bà Trưng, TP. Đà Lạt, Lâm Đồng',
 ];
 
-async function main() {
-  console.log('🌱 Bắt đầu dọn dẹp và nạp dữ liệu mẫu toàn diện...');
+// helper: số 2 chữ số  -> "01", "02", ...
+const pad = (n: number) => String(n).padStart(2, '0');
+const pick = <T,>(arr: T[], i: number) => arr[i % arr.length];
 
-  // 1. XÓA DỮ LIỆU CŨ (Để reset hoàn toàn DB mỗi khi chạy lại)
-  console.log('--- Đang dọn dẹp Database ---');
-  await prisma.attachment.deleteMany();
-  await prisma.review.deleteMany();
-  await prisma.orderItem.deleteMany();
-  await prisma.payment.deleteMany();
-  await prisma.order.deleteMany();
-  await prisma.chatMessage.deleteMany();
-  await prisma.conversation.deleteMany();
-  await prisma.savedVoucher.deleteMany();
-  await prisma.voucher.deleteMany();
-  await prisma.verification.deleteMany();
-  await prisma.product.deleteMany();
-  await prisma.category.deleteMany();
-  await prisma.profile.deleteMany();
-  await prisma.user.deleteMany();
+// ════════════════════════════════════════════════════════════════════════════
+//  CLEANUP PHASE — xoá mọi bản ghi SEED theo thứ tự an toàn FK
+// ════════════════════════════════════════════════════════════════════════════
+async function cleanup() {
+  console.log('🧹 [Cleanup] Đang xoá dữ liệu SEED cũ (giữ nguyên dữ liệu thật)...');
 
-  const passwordHash = await bcrypt.hash('123456', 10);
+  const seedUsers = await prisma.user.findMany({
+    where: { email: { startsWith: SEED_EMAIL_PREFIX } },
+    select: { id: true },
+  });
+  const userIds = seedUsers.map((u) => u.id);
 
-  // 2. TẠO NGƯỜI MUA (BUYER)
-  console.log('--- Tạo Khách hàng ---');
-  const buyer = await prisma.user.create({
-    data: {
-      id: 'buyer-default',
-      email: 'khach@gmail.com',
-      password_hash: passwordHash,
-      full_name: 'Khách Hàng',
-      is_buyer: true,
-      verified_email: true,
-    }
+  // Bắt thêm các product mang prefix [SEED] kể cả nếu chủ sở hữu không còn là seed user
+  const seedProducts = await prisma.product.findMany({
+    where: {
+      OR: [{ seller_id: { in: userIds } }, { name: { startsWith: SEED_NAME_PREFIX } }],
+    },
+    select: { id: true },
+  });
+  const productIds = seedProducts.map((p) => p.id);
+
+  if (userIds.length === 0 && productIds.length === 0) {
+    console.log('🧹 [Cleanup] Không tìm thấy dữ liệu SEED — bỏ qua.');
+    return;
+  }
+
+  const orders = await prisma.order.findMany({
+    where: { OR: [{ buyer_id: { in: userIds } }, { seller_id: { in: userIds } }] },
+    select: { id: true },
+  });
+  const orderIds = orders.map((o) => o.id);
+
+  const convs = await prisma.conversation.findMany({
+    where: { OR: [{ user1_id: { in: userIds } }, { user2_id: { in: userIds } }] },
+    select: { id: true },
+  });
+  const convIds = convs.map((c) => c.id);
+
+  const vouchers = await prisma.voucher.findMany({
+    where: { seller_id: { in: userIds } },
+    select: { id: true },
+  });
+  const voucherIds = vouchers.map((v) => v.id);
+
+  // Thứ tự xoá: lá -> gốc (tránh FK violation vì schema phần lớn KHÔNG cascade)
+  await prisma.review.deleteMany({ where: { order_id: { in: orderIds } } });
+  await prisma.payment.deleteMany({ where: { order_id: { in: orderIds } } });
+  await prisma.orderItem.deleteMany({
+    where: { OR: [{ order_id: { in: orderIds } }, { product_id: { in: productIds } }] },
+  });
+  await prisma.order.deleteMany({ where: { id: { in: orderIds } } });
+
+  await prisma.chatMessage.deleteMany({
+    where: {
+      OR: [
+        { conversation_id: { in: convIds } },
+        { sender_id: { in: userIds } },
+        { context_product_id: { in: productIds } },
+      ],
+    },
+  });
+  await prisma.conversation.deleteMany({ where: { id: { in: convIds } } });
+
+  await prisma.savedVoucher.deleteMany({
+    where: { OR: [{ user_id: { in: userIds } }, { voucher_id: { in: voucherIds } }] },
+  });
+  await prisma.voucher.deleteMany({ where: { id: { in: voucherIds } } });
+
+  await prisma.checkoutSession.deleteMany({ where: { buyer_id: { in: userIds } } });
+  await prisma.productEmbedding.deleteMany({ where: { product_id: { in: productIds } } });
+  await prisma.attachment.deleteMany({ where: { target_id: { in: [...productIds, ...userIds] } } });
+  await prisma.userBehavior.deleteMany({ where: { user_id: { in: userIds } } });
+  await prisma.product.deleteMany({ where: { id: { in: productIds } } });
+
+  // Các bảng có onDelete: Cascade theo User — vẫn xoá tường minh cho chắc
+  await prisma.aISession.deleteMany({ where: { user_id: { in: userIds } } });
+  await prisma.recommendationCache.deleteMany({ where: { user_id: { in: userIds } } });
+  await prisma.verification.deleteMany({ where: { userId: { in: userIds } } });
+
+  await prisma.profile.deleteMany({ where: { user_id: { in: userIds } } });
+  await prisma.user.deleteMany({ where: { id: { in: userIds } } });
+
+  console.log(
+    `🧹 [Cleanup] Đã xoá: ${userIds.length} users, ${productIds.length} products, ${orderIds.length} orders, ${convIds.length} conversations, ${voucherIds.length} vouchers.`,
+  );
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  SEED PHASE
+// ════════════════════════════════════════════════════════════════════════════
+async function seed() {
+  const counts = {
+    users: 0,
+    products: 0,
+    categories: 0,
+    vouchers: 0,
+    orders: 0,
+    reviews: 0,
+    payments: 0,
+    conversations: 0,
+    messages: 0,
+    behaviors: 0,
+  };
+
+  // Hash 1 lần — dùng chung cho mọi seed user
+  const passwordHash = await bcrypt.hash(SEED_PASSWORD, 10);
+
+  // ── 1. CATEGORIES (upsert theo name — KHÔNG xoá, có thể dùng chung) ──────────
+  console.log('📂 [Seed] Categories...');
+  const categories: Record<string, number> = {};
+  for (const name of CATEGORY_NAMES) {
+    const cat = await prisma.category.upsert({
+      where: { name },
+      update: {},
+      create: { name },
+    });
+    categories[name] = cat.id;
+    counts.categories++;
+  }
+
+  // ── 2. USERS ─────────────────────────────────────────────────────────────────
+  console.log('👤 [Seed] Users (buyers / sellers / hybrids)...');
+  const baseUser = (email: string, full_name: string, isBuyer: boolean, isSeller: boolean) => ({
+    email,
+    password_hash: passwordHash,
+    full_name,
+    display_name: full_name,
+    provider: 'password',
+    is_buyer: isBuyer,
+    is_seller: isSeller,
+    verified_email: true, // ← bỏ qua OTP, login thẳng
+    last_login_at: new Date(),
   });
 
-  // 3. TẠO CỬA HÀNG (SELLERS)
-  console.log('--- Tạo Cửa hàng (Shops) ---');
-  const dbSellers = {};
-  for (const shop of SHOPS) {
-    const seller = await prisma.user.create({
-      data: {
-        id: shop.userId,
-        email: shop.email,
-        password_hash: passwordHash,
-        full_name: shop.name,
-        is_seller: true,
-        verified_email: true,
-        profile: {
-          create: {
-            store_name: shop.name,
-            address: shop.location,
-            description: shop.desc,
-            is_verified: true
-          }
-        }
-      }
-    });
-    dbSellers[shop.id] = seller.id;
-
-    // Lưu Avatar của Shop vào bảng Attachment
-    await prisma.attachment.create({
-      data: {
-        url: shop.avatar,
-        file_type: 'IMAGE',
-        target_id: seller.id,
-        target_type: TargetType.AVATAR
-      }
-    });
-  }
-
-  // 4. TẠO DANH MỤC
-  console.log('--- Tạo Danh Mục ---');
-  const dbCategories = {};
-  for (const cat of CATEGORIES) {
-    const createdCat = await prisma.category.create({
-      data: { name: cat.name }
-    });
-    dbCategories[cat.id] = createdCat.id;
-  }
-
-  // 5. TẠO SẢN PHẨM & HÌNH ẢNH
-  console.log(`--- Tạo ${PRODUCTS.length} Sản phẩm ---`);
-  for (const p of PRODUCTS) {
-    const prod = await prisma.product.create({
-      data: {
-        name: p.name,
-        description: p.description,
-        reference_price: p.price,
-        stock_quantity: p.stock,
-        unit: 'kg',
-        location: p.origin,
-        category_id: dbCategories[p.category],
-        seller_id: dbSellers[p.shopId],
-        is_active: true,
-      }
-    });
-
-    // Tạo hình ảnh sản phẩm
-    if (p.images.length > 0) {
-      await prisma.attachment.createMany({
-        data: p.images.map(url => ({
-          url,
-          file_type: 'IMAGE',
-          target_id: prod.id,
-          target_type: TargetType.PRODUCT
-        }))
+  // Buyers
+  const buyers = await Promise.all(
+    Array.from({ length: N_BUYERS }, (_, i) => {
+      const n = pad(i + 1);
+      return prisma.user.create({
+        data: baseUser(`${SEED_EMAIL_PREFIX}buyer${n}${EMAIL_DOMAIN}`, `Người Mua ${n}`, true, false),
       });
-    }
+    }),
+  );
 
-    // 6. GỈA LẬP ĐƠN HÀNG VÀ ĐÁNH GIÁ (Để có Review và Lượt bán)
-    // Tự động tạo 1 đơn hàng đã hoàn thành và 1 đánh giá 5 sao cho mỗi sản phẩm
+  // Sellers (kèm Profile / shop)
+  const sellers = await Promise.all(
+    Array.from({ length: N_SELLERS }, (_, i) => {
+      const n = pad(i + 1);
+      return prisma.user.create({
+        data: {
+          ...baseUser(`${SEED_EMAIL_PREFIX}seller${n}${EMAIL_DOMAIN}`, `Nông Trại ${n}`, false, true),
+          profile: {
+            create: {
+              store_name: `[SEED] Nông Trại Sạch ${n}`,
+              address: pick(ADDRESSES, i),
+              description: 'Cửa hàng nông sản sạch — dữ liệu demo.',
+              is_verified: true,
+            },
+          },
+        },
+      });
+    }),
+  );
+
+  // Hybrids (BUYER + SELLER, kèm Profile)
+  const hybrids = await Promise.all(
+    Array.from({ length: N_HYBRIDS }, (_, i) => {
+      const n = pad(i + 1);
+      return prisma.user.create({
+        data: {
+          ...baseUser(`${SEED_EMAIL_PREFIX}hybrid${n}${EMAIL_DOMAIN}`, `Hộ Kinh Doanh ${n}`, true, true),
+          profile: {
+            create: {
+              store_name: `[SEED] Vựa Nông Sản ${n}`,
+              address: pick(ADDRESSES, i + 2),
+              description: 'Vừa mua vừa bán — tài khoản demo lưỡng vai.',
+              is_verified: true,
+            },
+          },
+        },
+      });
+    }),
+  );
+  counts.users = buyers.length + sellers.length + hybrids.length;
+
+  const sellingUsers = [...sellers, ...hybrids]; // 20 user có thể bán
+  const buyingUsers = [...buyers, ...hybrids]; // 30 user có thể mua
+
+  // ── 3. PRODUCTS (5–10 / seller) + Attachment ảnh ─────────────────────────────
+  console.log('🥬 [Seed] Products...');
+  const productsBySeller: Record<string, { id: string; price: number; name: string; unit: string }[]> = {};
+  for (let s = 0; s < sellingUsers.length; s++) {
+    const seller = sellingUsers[s];
+    const catName = CATEGORY_NAMES[s % CATEGORY_NAMES.length];
+    const pool = PRODUCT_POOL[catName];
+    const nProducts = 5 + (s % 6); // 5..10
+    productsBySeller[seller.id] = [];
+
+    for (let p = 0; p < nProducts; p++) {
+      const tpl = pool[p % pool.length];
+      const stock = 30 + ((s + p) % 20) * 10; // 30..220
+      const allowNego = p % 3 === 0; // ~1/3 sản phẩm cho thương lượng
+      const product = await prisma.product.create({
+        data: {
+          name: `${SEED_NAME_PREFIX}${tpl.name}`,
+          description: `${tpl.name} chất lượng cao, canh tác theo tiêu chuẩn sạch. (Dữ liệu demo SEED)`,
+          reference_price: tpl.price,
+          stock_quantity: stock,
+          unit: tpl.unit,
+          location: pick(ADDRESSES, s),
+          certification: allowNego ? 'VietGAP' : null,
+          min_negotiation_qty: allowNego ? 10 : null,
+          category_id: categories[catName],
+          seller_id: seller.id,
+          is_active: true,
+          status: ProductStatus.ACTIVE,
+        },
+      });
+      // 2 ảnh / sản phẩm (Attachment, target_type = PRODUCT)
+      await prisma.attachment.createMany({
+        data: [0, 1].map((k) => ({
+          url: pick(IMAGE_POOL, p + k),
+          file_type: 'IMAGE',
+          target_id: product.id,
+          target_type: TargetType.PRODUCT,
+        })),
+      });
+      productsBySeller[seller.id].push({ id: product.id, price: tpl.price, name: tpl.name, unit: tpl.unit });
+      counts.products++;
+    }
+  }
+
+  // ── 4. VOUCHERS ──────────────────────────────────────────────────────────────
+  // LƯU Ý: schema Voucher yêu cầu seller_id (KHÔNG có voucher "toàn sàn" thực sự).
+  // ⇒ "global" SEED-WELCOME-10 được gán cho seller demo đầu tiên.
+  console.log('🎟️  [Seed] Vouchers...');
+  const now = new Date();
+  const in30d = new Date(now.getTime() + 30 * 86400_000);
+
+  // "Global-ish" welcome voucher (gắn vào seller demo đầu tiên)
+  await prisma.voucher.create({
+    data: {
+      seller_id: sellingUsers[0].id,
+      code: 'SEED-WELCOME-10',
+      discount_type: DiscountType.PERCENT,
+      discount_value: 10,
+      min_order_value: 100000,
+      max_discount_amount: 50000,
+      valid_from: now,
+      valid_to: in30d,
+      usage_limit: 1000,
+      is_active: true,
+    },
+  });
+  counts.vouchers++;
+
+  // Voucher riêng cho mỗi seller
+  for (let s = 0; s < sellingUsers.length; s++) {
+    const seller = sellingUsers[s];
+    const isPercent = s % 2 === 0;
+    await prisma.voucher.create({
+      data: {
+        seller_id: seller.id,
+        code: `SEED-SHOP${pad(s + 1)}`,
+        discount_type: isPercent ? DiscountType.PERCENT : DiscountType.FIXED,
+        discount_value: isPercent ? 15 : 20000,
+        min_order_value: 50000,
+        max_discount_amount: isPercent ? 30000 : 20000,
+        valid_from: now,
+        valid_to: in30d,
+        usage_limit: 100,
+        is_active: true,
+      },
+    });
+    counts.vouchers++;
+  }
+
+  // ── 5. ORDERS + ITEMS + PAYMENTS + REVIEWS ───────────────────────────────────
+  console.log('🧾 [Seed] Orders / Payments / Reviews...');
+  // Phân bổ trạng thái: nhiều COMPLETED hơn để có review
+  const STATUS_CYCLE: OrderStatus[] = [
+    OrderStatus.PENDING,
+    OrderStatus.CONFIRMED,
+    OrderStatus.SHIPPING,
+    OrderStatus.COMPLETED,
+    OrderStatus.COMPLETED,
+    OrderStatus.COMPLETED,
+    OrderStatus.CANCELLED,
+    OrderStatus.FAILED,
+  ];
+  const METHOD_CYCLE: PaymentMethod[] = [
+    PaymentMethod.COD,
+    PaymentMethod.MOMO,
+    PaymentMethod.QR_CODE,
+    PaymentMethod.ZALOPAY,
+  ];
+
+  for (let i = 0; i < N_ORDERS; i++) {
+    const seller = pick(sellingUsers, i);
+    let buyer = pick(buyingUsers, i * 3 + 1);
+    if (buyer.id === seller.id) buyer = pick(buyingUsers, i * 3 + 2); // tránh tự mua
+    if (buyer.id === seller.id) continue;
+
+    const sellerProducts = productsBySeller[seller.id];
+    if (!sellerProducts || sellerProducts.length === 0) continue;
+
+    const status = pick(STATUS_CYCLE, i);
+    const method = pick(METHOD_CYCLE, i);
+
+    // 1–2 sản phẩm / đơn
+    const nItems = 1 + (i % 2);
+    const items = Array.from({ length: nItems }, (_, k) => {
+      const prod = pick(sellerProducts, i + k);
+      const qty = 1 + ((i + k) % 5); // 1..5
+      return { product_id: prod.id, quantity: qty, negotiated_price: prod.price };
+    });
+    const total = items.reduce((sum, it) => sum + it.quantity * it.negotiated_price, 0);
+
+    const createdAt = new Date(now.getTime() - ((i % 30) + 1) * 86400_000); // rải trong 30 ngày
+    const shipped =
+      status === OrderStatus.SHIPPING || status === OrderStatus.COMPLETED
+        ? new Date(createdAt.getTime() + 86400_000)
+        : null;
+
     const order = await prisma.order.create({
       data: {
         buyer_id: buyer.id,
-        seller_id: dbSellers[p.shopId],
-        status: OrderStatus.COMPLETED,
-        final_total_price: p.price,
-        shipping_address: '123 Đường ABC, Quận 1, TP.HCM',
-        order_items: {
-          create: {
-            product_id: prod.id,
-            quantity: 1, // Bán được 1 cái
-            negotiated_price: p.price
-          }
-        }
-      }
+        seller_id: seller.id,
+        status,
+        payment_method: method,
+        final_total_price: total,
+        shipping_address: pick(ADDRESSES, i),
+        shipped_at: shipped,
+        created_at: createdAt,
+        note: status === OrderStatus.FAILED ? 'Giao thất bại — khách không nhận máy.' : null,
+        order_items: { create: items },
+      },
     });
+    counts.orders++;
 
-    await prisma.review.create({
+    // Payment: phản ánh trạng thái đơn
+    let payStatus: PaymentStatus = PaymentStatus.UNPAID;
+    if (status === OrderStatus.COMPLETED) payStatus = PaymentStatus.PAID;
+    else if (status === OrderStatus.FAILED) payStatus = PaymentStatus.FAILED;
+    else if (method !== PaymentMethod.COD && (status === OrderStatus.SHIPPING || status === OrderStatus.CONFIRMED))
+      payStatus = PaymentStatus.PAID; // online đã trả trước
+    await prisma.payment.create({
       data: {
         order_id: order.id,
-        reviewer_id: buyer.id,
-        rating: 5,
-        comment: `Sản phẩm ${p.name} rất tuyệt vời! Sẽ tiếp tục ủng hộ shop.`
-      }
+        payer_id: buyer.id,
+        amount: total,
+        payment_method: method,
+        status: payStatus,
+        payment_type: PaymentType.PAYMENT,
+        transaction_ref: method === PaymentMethod.COD ? null : `SEED-TXN-${pad(i + 1)}`,
+        created_at: createdAt,
+      },
     });
+    counts.payments++;
+
+    // Review cho đơn COMPLETED (4–5 sao)
+    if (status === OrderStatus.COMPLETED) {
+      const replied = i % 2 === 0;
+      await prisma.review.create({
+        data: {
+          order_id: order.id,
+          reviewer_id: buyer.id,
+          rating: 4 + (i % 2), // 4 hoặc 5
+          comment: pick(REVIEW_COMMENTS, i),
+          seller_reply: replied ? pick(SELLER_REPLIES, i) : null,
+          seller_replied_at: replied ? new Date(createdAt.getTime() + 2 * 86400_000) : null,
+          created_at: new Date(createdAt.getTime() + 2 * 86400_000),
+        },
+      });
+      counts.reviews++;
+
+      // Hành vi PURCHASE (phục vụ recommendations)
+      await prisma.userBehavior.create({
+        data: {
+          user_id: buyer.id,
+          action: BehaviorAction.PURCHASE,
+          target_id: items[0].product_id,
+          weight: 5,
+          created_at: createdAt,
+        },
+      });
+      counts.behaviors++;
+    }
   }
 
-  console.log('✅ Hoàn tất việc tạo dữ liệu Database');
+  // Vài hành vi VIEW_PRODUCT cho buyer (làm recommendations phong phú hơn)
+  for (let i = 0; i < buyers.length; i++) {
+    const buyer = buyers[i];
+    const seller = pick(sellingUsers, i);
+    const prod = pick(productsBySeller[seller.id], i);
+    if (!prod) continue;
+    await prisma.userBehavior.create({
+      data: {
+        user_id: buyer.id,
+        action: BehaviorAction.VIEW_PRODUCT,
+        target_id: prod.id,
+        weight: 1,
+      },
+    });
+    counts.behaviors++;
+  }
+
+  // ── 6. NEGOTIATION THREADS (chat thương lượng → quote ACCEPTED → Order) ───────
+  console.log('💬 [Seed] Negotiation threads...');
+  for (let t = 0; t < N_NEGOTIATIONS; t++) {
+    const seller = sellingUsers[t]; // 5 seller khác nhau
+    const buyer = buyers[t]; // 5 buyer khác nhau → cặp (buyer,seller) duy nhất
+    const sellerProducts = productsBySeller[seller.id];
+    if (!sellerProducts || sellerProducts.length === 0) continue;
+    const prod = sellerProducts[0];
+
+    const bulkQty = 20 + t * 5; // mua sỉ
+    const quotedUnitPrice = Math.round(prod.price * 0.9); // seller giảm 10%
+    const tBase = new Date(now.getTime() - (t + 1) * 3600_000);
+
+    const conv = await prisma.conversation.create({
+      data: {
+        user1_id: buyer.id,
+        user2_id: seller.id,
+        created_at: tBase,
+        user1_last_read_at: new Date(tBase.getTime() + 5 * 60_000),
+        user2_last_read_at: new Date(tBase.getTime() + 5 * 60_000),
+      },
+    });
+    counts.conversations++;
+
+    // (1) Buyer hỏi giá sỉ
+    await prisma.chatMessage.create({
+      data: {
+        conversation_id: conv.id,
+        sender_id: buyer.id,
+        message_type: MessageType.TEXT,
+        message_content: `Shop ơi, mình muốn lấy sỉ ${bulkQty}${prod.unit} ${prod.name}, có giá tốt hơn không ạ?`,
+        context_product_id: prod.id,
+        client_message_id: `seed-neg-${t}-buyer-ask`,
+        created_at: new Date(tBase.getTime() + 1 * 60_000),
+      },
+    });
+    counts.messages++;
+
+    // (2) Seller gửi NEGOTIATION_QUOTE
+    const quote = await prisma.chatMessage.create({
+      data: {
+        conversation_id: conv.id,
+        sender_id: seller.id,
+        message_type: MessageType.NEGOTIATION_QUOTE,
+        message_content: `Báo giá sỉ ${prod.name}: ${quotedUnitPrice.toLocaleString('vi-VN')}đ/${prod.unit} cho ${bulkQty}${prod.unit}.`,
+        context_product_id: prod.id,
+        quote_product_id: prod.id,
+        quote_product_name: prod.name,
+        quote_quantity: bulkQty,
+        quote_price: quotedUnitPrice,
+        proposed_quantity: bulkQty,
+        proposed_price: prod.price,
+        quote_unit: prod.unit,
+        quote_status: QuoteStatus.ACCEPTED, // buyer đã chấp nhận
+        client_message_id: `seed-neg-${t}-seller-quote`,
+        created_at: new Date(tBase.getTime() + 3 * 60_000),
+      },
+    });
+    counts.messages++;
+
+    // (3) Buyer xác nhận
+    await prisma.chatMessage.create({
+      data: {
+        conversation_id: conv.id,
+        sender_id: buyer.id,
+        message_type: MessageType.TEXT,
+        message_content: 'Ok shop, mình chốt đơn với giá này nhé!',
+        client_message_id: `seed-neg-${t}-buyer-accept`,
+        created_at: new Date(tBase.getTime() + 4 * 60_000),
+      },
+    });
+    counts.messages++;
+
+    // (4) Order tạo từ quote — liên kết qua negotiation_quote_id
+    const negoTotal = bulkQty * quotedUnitPrice;
+    const order = await prisma.order.create({
+      data: {
+        buyer_id: buyer.id,
+        seller_id: seller.id,
+        status: OrderStatus.CONFIRMED,
+        payment_method: PaymentMethod.COD,
+        final_total_price: negoTotal,
+        shipping_address: pick(ADDRESSES, t),
+        negotiation_quote_id: quote.id,
+        created_at: new Date(tBase.getTime() + 5 * 60_000),
+        order_items: {
+          create: { product_id: prod.id, quantity: bulkQty, negotiated_price: quotedUnitPrice },
+        },
+      },
+    });
+    counts.orders++;
+
+    await prisma.payment.create({
+      data: {
+        order_id: order.id,
+        payer_id: buyer.id,
+        amount: negoTotal,
+        payment_method: PaymentMethod.COD,
+        status: PaymentStatus.UNPAID,
+        payment_type: PaymentType.PAYMENT,
+      },
+    });
+    counts.payments++;
+  }
+
+  return counts;
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  MAIN
+// ════════════════════════════════════════════════════════════════════════════
+async function main() {
+  // ── Guard môi trường ──
+  if (process.env.NODE_ENV === 'production') {
+    console.error('⛔ NODE_ENV=production — TỪ CHỐI chạy seed để bảo vệ dữ liệu thật.');
+    process.exit(1);
+  }
+
+  console.log('🌱 ====== AGRI CONNECT — SEED DEMO DATA ======');
+  console.log(`    Mật khẩu mọi tài khoản: ${SEED_PASSWORD}`);
+
+  await cleanup();
+  const counts = await seed();
+
+  console.log('\n✅ ====== HOÀN TẤT ======');
+  console.log(
+    `   👤 Users:         ${counts.users}  (${N_BUYERS} buyers, ${N_SELLERS} sellers, ${N_HYBRIDS} hybrids)`,
+  );
+  console.log(`   📂 Categories:    ${counts.categories}`);
+  console.log(`   🥬 Products:      ${counts.products}`);
+  console.log(`   🎟️  Vouchers:      ${counts.vouchers}`);
+  console.log(`   🧾 Orders:        ${counts.orders}`);
+  console.log(`   💳 Payments:      ${counts.payments}`);
+  console.log(`   ⭐ Reviews:       ${counts.reviews}`);
+  console.log(`   💬 Conversations: ${counts.conversations}  (${counts.messages} messages)`);
+  console.log(`   📊 Behaviors:     ${counts.behaviors}`);
+  console.log('\n   🔑 Đăng nhập demo:');
+  console.log(`      Buyer : seed.buyer01${EMAIL_DOMAIN}`);
+  console.log(`      Seller: seed.seller01${EMAIL_DOMAIN}`);
+  console.log(`      Hybrid: seed.hybrid01${EMAIL_DOMAIN}`);
+  console.log(`      Mật khẩu: ${SEED_PASSWORD}`);
 }
 
 main()
   .catch((e) => {
-    console.error(e);
+    console.error('❌ Seed thất bại:', e);
     process.exit(1);
   })
   .finally(async () => {
