@@ -8,6 +8,7 @@ import {
   Request,
   UseGuards,
   Param,
+  Query,
   UploadedFiles,
   UseInterceptors,
 } from '@nestjs/common';
@@ -59,6 +60,17 @@ export class ProductsController {
   @Get()
   async getAllProducts() {
     return this.productsService.findAllPublic();
+  }
+
+  // Tìm kiếm sản phẩm có phân trang (PostgreSQL insensitive contains). KHÔNG đổi
+  // GET / (findAllPublic) để tránh vỡ FE cũ. Phải đặt TRƯỚC :id.
+  @Get('search')
+  async searchProducts(
+    @Query('q') q?: string,
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+  ) {
+    return this.productsService.searchPublic(q ?? '', Number(page) || 1, Number(limit) || 12);
   }
 
   // Danh sách danh mục — FE dùng để render dropdown bằng id số. Phải đặt TRƯỚC :id.

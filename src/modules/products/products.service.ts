@@ -8,7 +8,7 @@ import {
 import { promises as fsp } from 'fs';
 import { DatabaseService } from '../../database/database.service';
 import { CreateProductDto } from './dtos/create-product.dto';
-import { TargetType, ProductStatus } from '@prisma/client';
+import { TargetType, ProductStatus, Prisma } from '@prisma/client';
 
 // Best-effort cleanup of files multer dropped on disk before the handler ran.
 // Used when create/update fails after multer has already persisted the upload —
@@ -279,6 +279,68 @@ export class ProductsService {
   }
 
   // --- 3. Lấy tất cả sản phẩm cho Trang chủ (Public) ---
+  // Tìm kiếm public có phân trang: PostgreSQL `contains` + `mode:'insensitive'`,
+  // chỉ sản phẩm is_active (ẩn inactive/deleted khỏi buyer). Trả shape phân trang
+  // chuẩn { items, total, page, totalPages }. KHÔNG đụng findAllPublic.
+  async searchPublic(q: string, page = 1, limit = 12) {
+    const keyword = (q ?? '').trim();
+    const safePage = page > 0 ? Math.floor(page) : 1;
+    const safeLimit = Math.min(Math.max(1, Math.floor(limit)), 48);
+
+    const where: Prisma.ProductWhereInput = {
+      is_active: true,
+      ...(keyword
+        ? {
+            OR: [
+              { name: { contains: keyword, mode: 'insensitive' } },
+              { description: { contains: keyword, mode: 'insensitive' } },
+            ],
+          }
+        : {}),
+    };
+
+    const [rows, total] = await Promise.all([
+      this.db.product.findMany({
+        where,
+        orderBy: { created_at: 'desc' },
+        skip: (safePage - 1) * safeLimit,
+        take: safeLimit,
+        include: {
+          category: { select: { name: true } },
+          seller: { select: { id: true, full_name: true, profile: { select: { store_name: true } } } },
+        },
+      }),
+      this.db.product.count({ where }),
+    ]);
+
+    const productIds = rows.map((p) => p.id);
+    const imgs = productIds.length
+      ? await this.db.attachment.findMany({
+          where: { target_id: { in: productIds }, target_type: 'PRODUCT' },
+          select: { target_id: true, url: true },
+        })
+      : [];
+    const imageMap = imgs.reduce((acc, a) => {
+      (acc[a.target_id] ??= []).push(a.url);
+      return acc;
+    }, {} as Record<string, string[]>);
+
+    const items = rows.map((p) => ({
+      id: p.id,
+      name: p.name,
+      slug: p.id,
+      description: p.description,
+      price: Number(p.reference_price),
+      unit: p.unit,
+      seller_id: p.seller_id,
+      store_name: p.seller?.profile?.store_name ?? p.seller?.full_name ?? null,
+      category: p.category?.name ?? null,
+      images: imageMap[p.id] ?? [],
+    }));
+
+    return { items, total, page: safePage, totalPages: Math.max(1, Math.ceil(total / safeLimit)) };
+  }
+
   async findAllPublic() {
     const products = await this.db.product.findMany({
       where: { is_active: true },

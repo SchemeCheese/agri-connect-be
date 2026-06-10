@@ -142,7 +142,7 @@ export class DisputeService {
   async adjudicate(_adminId: string, id: string, dto: AdjudicateDto) {
     const dispute = await this.db.dispute.findUnique({
       where: { id },
-      include: { order: { include: { payments: true } } },
+      include: { order: { include: { payments: true, order_items: { select: { product_id: true, quantity: true } } } } },
     });
     if (!dispute) throw new NotFoundException('Khiếu nại không tồn tại.');
     if (dispute.status === DisputeStatus.RESOLVED || dispute.status === DisputeStatus.CLOSED) {
@@ -198,6 +198,17 @@ export class DisputeService {
       }
       if (isRefundAction && hasOnlinePaid) {
         await this.payments.markRefunding(tx, dispute.order_id);
+      }
+      // Đơn COD xử buyer-thắng → RETURNED: hoàn lại tồn kho đã trừ lúc checkout
+      // (atomic, trong cùng $transaction). Idempotent vì adjudicate chặn xử lại
+      // khi dispute đã RESOLVED/CLOSED.
+      if (newOrderStatus === OrderStatus.RETURNED) {
+        for (const it of order.order_items) {
+          await tx.product.update({
+            where: { id: it.product_id },
+            data: { stock_quantity: { increment: it.quantity } },
+          });
+        }
       }
     });
 

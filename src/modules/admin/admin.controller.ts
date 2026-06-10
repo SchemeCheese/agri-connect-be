@@ -91,4 +91,10 @@ export class AdminController {
   adjudicate(@Request() req, @Param('id') id: string, @Body() dto: AdjudicateDto) {
     return this.disputes.adjudicate(req.user.sub, id, dto);
   }
+
+  // Alias đúng tên spec: POST /admin/disputes/:id/resolve (cùng logic adjudicate).
+  @Post('disputes/:id/resolve')
+  resolve(@Request() req, @Param('id') id: string, @Body() dto: AdjudicateDto) {
+    return this.disputes.adjudicate(req.user.sub, id, dto);
+  }
 }

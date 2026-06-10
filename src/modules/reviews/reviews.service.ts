@@ -47,7 +47,9 @@ export class ReviewsService {
       where: { order_id: dto.order_id, reviewer_id: buyerId },
     });
 
-    if (existing) throw new ConflictException('Bạn đã đánh giá đơn hàng này rồi.');
+    // Trả 400 Bad Request (acceptance: duplicate review bị chặn bởi DB @@unique +
+    // BE trả 400). DB constraint @@unique([order_id, reviewer_id]) là chốt chặn cuối.
+    if (existing) throw new BadRequestException('Bạn đã đánh giá đơn hàng này rồi.');
 
     // 3. Tạo review + lưu ảnh đính kèm trong 1 transaction
     const review = await this.db.$transaction(async (tx) => {
