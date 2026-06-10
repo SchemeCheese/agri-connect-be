@@ -262,7 +262,7 @@ export class OrdersService {
         const allProductIds = dto.seller_orders.flatMap((so) => so.items.map((i) => i.product_id));
         const dbProducts = await this.databaseService.product.findMany({
             where: { id: { in: allProductIds } },
-            select: { id: true, seller_id: true, is_active: true, reference_price: true },
+            select: { id: true, seller_id: true, is_active: true, reference_price: true, stock_quantity: true },
         });
 
         if (dbProducts.length !== allProductIds.length) {
@@ -271,7 +271,19 @@ export class OrdersService {
 
         const productMap = new Map(dbProducts.map((p) => [p.id, p]));
 
-        // Xác nhận sản phẩm thuộc đúng seller và đang active
+        // Gom tổng số lượng yêu cầu theo product_id — cùng 1 sản phẩm có thể xuất hiện
+        // nhiều dòng (giỏ tách dòng); phải cộng dồn rồi mới so với tồn kho.
+        const requestedQtyByProduct = new Map<string, number>();
+        for (const sellerOrder of dto.seller_orders) {
+            for (const item of sellerOrder.items) {
+                requestedQtyByProduct.set(
+                    item.product_id,
+                    (requestedQtyByProduct.get(item.product_id) ?? 0) + Number(item.quantity),
+                );
+            }
+        }
+
+        // Xác nhận sản phẩm thuộc đúng seller, đang active, số lượng hợp lệ và đủ tồn kho.
         for (const sellerOrder of dto.seller_orders) {
             for (const item of sellerOrder.items) {
                 const p = productMap.get(item.product_id)!;
@@ -283,6 +295,21 @@ export class OrdersService {
                         `Sản phẩm ${item.product_id} không thuộc shop ${sellerOrder.seller_id}.`
                     );
                 }
+                // Chặn 0 / số âm ngay ở tầng nghiệp vụ (lớp phòng thủ thứ 2 sau DTO @Min(1)).
+                if (!Number.isFinite(Number(item.quantity)) || Number(item.quantity) < 1) {
+                    throw new BadRequestException('Số lượng sản phẩm không hợp lệ.');
+                }
+            }
+        }
+
+        // ── Pre-check tồn kho (Vietnamese, rõ ràng) ───────────────────────────────
+        // Backend là nguồn quyền lực cuối cùng: nếu TỔNG số lượng yêu cầu của bất kỳ
+        // sản phẩm nào > tồn kho hiện tại → chặn ngay với thông báo tiếng Việt, TRƯỚC
+        // khi vào transaction. Việc trừ kho atomic phía dưới vẫn giữ để chống race.
+        for (const [productId, requestedQty] of requestedQtyByProduct) {
+            const p = productMap.get(productId)!;
+            if (requestedQty > Number(p.stock_quantity)) {
+                throw new BadRequestException('Số lượng sản phẩm không đủ trong kho');
             }
         }
 
@@ -405,7 +432,8 @@ export class OrdersService {
                             },
                         });
                         if (stockUpdate.count === 0) {
-                            throw new BadRequestException('Product out of stock');
+                            // Race: tồn kho vừa bị checkout song song lấy mất sau pre-check.
+                            throw new BadRequestException('Số lượng sản phẩm không đủ trong kho');
                         }
                     }
 

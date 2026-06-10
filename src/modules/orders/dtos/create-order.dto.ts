@@ -7,6 +7,7 @@ import {
   IsEnum,
   IsOptional,
   ArrayMinSize,
+  Min,
 } from 'class-validator';
 import { Type } from 'class-transformer';
 import { PaymentMethod } from '@prisma/client';
@@ -17,6 +18,7 @@ class OrderItemDto {
   product_id: string;
 
   @IsNumber()
+  @Min(1, { message: 'Số lượng phải lớn hơn 0.' }) // chặn 0 và số âm
   quantity: number;
 
   @IsNumber()

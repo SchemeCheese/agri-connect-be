@@ -34,6 +34,7 @@ import {
 } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
 import { CATEGORY_NAMES, PERSON_NAMES, SHOP_NAMES, PRODUCT_CATALOG } from './seed-data';
+import { removeVietnameseTones } from '../src/common/utils/vietnamese-search.util';
 
 const prisma = new PrismaClient();
 
@@ -208,6 +209,7 @@ async function append() {
         where: { id: pid },
         update: {
           name: tpl.name, // ghi đè tên cũ (gỡ [SEED2])
+          search_name: removeVietnameseTones(tpl.name),
           description: `${tpl.name} — nông sản sạch, cam kết chất lượng.`,
           reference_price: tpl.price,
           unit: tpl.unit,
@@ -218,6 +220,7 @@ async function append() {
         create: {
           id: pid,
           name: tpl.name,
+          search_name: removeVietnameseTones(tpl.name),
           description: `${tpl.name} — nông sản sạch, cam kết chất lượng.`,
           reference_price: tpl.price,
           stock_quantity: stock,
@@ -716,6 +719,7 @@ async function ensureLegacyDemo() {
         data: {
           id: `legacy-${p.id}`,
           name: p.name,
+          search_name: removeVietnameseTones(p.name),
           description: p.description,
           reference_price: p.price,
           stock_quantity: p.stock,

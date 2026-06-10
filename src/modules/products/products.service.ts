@@ -9,6 +9,10 @@ import { promises as fsp } from 'fs';
 import { DatabaseService } from '../../database/database.service';
 import { CreateProductDto } from './dtos/create-product.dto';
 import { TargetType, ProductStatus, Prisma } from '@prisma/client';
+import {
+  removeVietnameseTones,
+  buildProductSearchWhere,
+} from '../../common/utils/vietnamese-search.util';
 
 // Best-effort cleanup of files multer dropped on disk before the handler ran.
 // Used when create/update fails after multer has already persisted the upload —
@@ -141,6 +145,7 @@ export class ProductsService {
         const created = await tx.product.create({
           data: {
             name: payload.name,
+            search_name: removeVietnameseTones(payload.name),
             description: payload.description,
             reference_price: payload.reference_price,
             stock_quantity: payload.stock_quantity,
@@ -287,16 +292,11 @@ export class ProductsService {
     const safePage = page > 0 ? Math.floor(page) : 1;
     const safeLimit = Math.min(Math.max(1, Math.floor(limit)), 48);
 
+    // Query builder dùng chung với GET /search → hai endpoint trả cùng tập sản phẩm.
+    // Khớp theo search_name (bỏ dấu) + name, KHÔNG match description (tránh ra phân bón).
     const where: Prisma.ProductWhereInput = {
       is_active: true,
-      ...(keyword
-        ? {
-            OR: [
-              { name: { contains: keyword, mode: 'insensitive' } },
-              { description: { contains: keyword, mode: 'insensitive' } },
-            ],
-          }
-        : {}),
+      ...buildProductSearchWhere(keyword),
     };
 
     const [rows, total] = await Promise.all([
@@ -586,7 +586,9 @@ export class ProductsService {
         const next = await tx.product.update({
           where: { id: productId },
           data: {
-            ...(dto.name !== undefined ? { name: dto.name } : {}),
+            ...(dto.name !== undefined
+              ? { name: dto.name, search_name: removeVietnameseTones(dto.name) }
+              : {}),
             ...(dto.description !== undefined ? { description: dto.description } : {}),
             ...(dto.reference_price !== undefined
               ? { reference_price: Number(dto.reference_price) }

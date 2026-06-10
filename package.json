@@ -13,6 +13,7 @@
     "seed:append": "ts-node prisma/seed-append.ts",
     "seed:admin": "ts-node prisma/seed-admin.ts",
     "demo:accounts": "ts-node scripts/list-demo-accounts.ts",
+    "backfill:search-name": "ts-node scripts/backfill-search-name.ts",
     "start:dev": "nest start --watch",
     "start:debug": "nest start --debug --watch",
     "start:prod": "node dist/src/main",

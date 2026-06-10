@@ -35,6 +35,7 @@ import {
 } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
 import { PERSON_NAMES, SHOP_NAMES, PRODUCT_CATALOG } from './seed-data';
+import { removeVietnameseTones } from '../src/common/utils/vietnamese-search.util';
 
 const prisma = new PrismaClient();
 
@@ -365,6 +366,7 @@ async function seed() {
       const product = await prisma.product.create({
         data: {
           name: tpl.name, // KHÔNG còn tiền tố [SEED] — nhận diện seed qua email người bán
+          search_name: removeVietnameseTones(tpl.name),
           description: `${tpl.name} — nông sản sạch, cam kết chất lượng.`,
           reference_price: tpl.price,
           stock_quantity: stock,

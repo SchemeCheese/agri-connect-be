@@ -219,6 +219,7 @@ model Product {
   category_id         Int
   category            Category          @relation(fields: [category_id], references: [id])
   name                String
+  search_name         String? // tên đã bỏ dấu + lowercase ("ca chua bi da lat") cho accent-insensitive search
   description         String?           @db.Text
   reference_price     Decimal           @db.Decimal(10, 2)
   stock_quantity      Decimal           @db.Decimal(10, 2)
@@ -238,6 +239,7 @@ model Product {
   @@index([is_active, name])
   @@index([is_active, category_id])
   @@index([is_active])
+  @@index([search_name])
   @@index([seller_id])
 }
 

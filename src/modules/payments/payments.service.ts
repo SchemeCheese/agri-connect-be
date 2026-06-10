@@ -329,8 +329,20 @@ export class PaymentsService {
    */
   async handleMomoReturn(query: Record<string, string>): Promise<string> {
     const feBase = process.env.FRONTEND_URL || 'http://localhost:3000';
+    // Cảnh báo cấu hình: thiếu FRONTEND_URL trên Railway → redirect buyer về
+    // localhost:3000 (không tồn tại với trình duyệt user) → "thành công nhưng
+    // trang trắng". Log để phát hiện ngay trên Railway logs.
+    if (!process.env.FRONTEND_URL) {
+      this.logger.warn(
+        '[MoMo RETURN] FRONTEND_URL chưa set — đang fallback http://localhost:3000. ' +
+          'Set FRONTEND_URL=<domain FE> trên Railway để redirect sau thanh toán hoạt động.',
+      );
+    }
     // query.orderId IS the real DB orderId (no composite suffix anymore).
     const orderId = query.orderId;
+    this.logger.log(
+      `[MoMo RETURN] orderId=${query.orderId ?? 'n/a'} resultCode=${query.resultCode ?? 'n/a'} transId=${query.transId ?? 'n/a'} feBase=${feBase}`,
+    );
     if (!orderId) return `${feBase}/payment/failed?reason=missing_orderId`;
 
     const { accessKey, secretKey, partnerCode } = this.getMomoConfig();

@@ -53,6 +53,11 @@ export class PaymentsController {
 
   // FE polling trạng thái thanh toán — chạy ngay sau khi mở popup MoMo,
   // tự đóng popup khi paymentStatus = PAID. Không cần gated dev — buyer-only.
+  // @SkipThrottle: FE poll mỗi vài giây trong lúc chờ IPN → KHÔNG được rate-limit
+  // (read-only, buyer-scoped). Trước đây thiếu decorator này nên poll 3s = đúng
+  // 20 req/phút = chạm ngưỡng throttler toàn cục (20/60s/IP) → 429 trên Railway
+  // (nơi IPN có thể về chậm/không về nên FE poll kéo dài, khác local+ngrok).
+  @SkipThrottle()
   @UseGuards(AuthGuard('jwt'))
   @Get('momo/status/:orderId')
   async momoStatus(@Request() req, @Param('orderId') orderId: string) {

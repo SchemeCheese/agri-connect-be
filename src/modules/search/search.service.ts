@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { DatabaseService } from '../../database/database.service';
+import { buildProductSearchWhere } from '../../common/utils/vietnamese-search.util';
 
 @Injectable()
 export class SearchService {
@@ -82,14 +83,13 @@ export class SearchService {
       product_count: productCountMap[p.user_id] ?? 0,
     }));
 
-    // ─── 2. Tìm kiếm Sản phẩm theo name hoặc description ───────────────────
+    // ─── 2. Tìm kiếm Sản phẩm — DÙNG CHUNG builder với GET /products/search ──
+    // Khớp search_name (bỏ dấu) + name → "ca chua" ra "Cà chua"; không match
+    // description nên autocomplete & trang kết quả luôn trả cùng sản phẩm lõi.
     const rawProducts = await this.db.product.findMany({
       where: {
         is_active: true,
-        OR: [
-          { name: { contains: keyword, mode: 'insensitive' } },
-          { description: { contains: keyword, mode: 'insensitive' } },
-        ],
+        ...buildProductSearchWhere(keyword),
       },
       include: {
         seller: {
