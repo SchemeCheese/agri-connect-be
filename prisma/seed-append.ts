@@ -33,14 +33,14 @@ import {
   TargetType,
 } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
+import { CATEGORY_NAMES, PERSON_NAMES, SHOP_NAMES, PRODUCT_CATALOG } from './seed-data';
 
 const prisma = new PrismaClient();
 
 // ─── Namespace MỚI (seed2) ───────────────────────────────────────────────────
 const NS = 'seed2'; // dùng cho id tiền tố: seed2-...
-const EMAIL_PREFIX = 'seed2.'; // seed2.buyer01@...
-const NAME_PREFIX = '[SEED2] ';
-const VOUCHER_PREFIX = 'SEED2';
+const EMAIL_PREFIX = 'seed2.'; // seed2.buyer01@... — NHẬN DIỆN seed qua EMAIL, không qua tên SP
+const VOUCHER_PREFIX = 'SEED2'; // marker chỉ ở voucher code, KHÔNG ở tên sản phẩm
 const EMAIL_DOMAIN = '@agriconnect.test';
 const SEED_PASSWORD = 'Seed@123456';
 
@@ -50,75 +50,7 @@ const N_HYBRIDS = 5;
 const N_ORDERS = 50; // trong khoảng 40–60
 const N_NEGOTIATIONS = 4; // trong khoảng 3–5
 
-const CATEGORY_NAMES = [
-  'Rau củ',
-  'Trái cây',
-  'Gạo & ngũ cốc',
-  'Thịt/Trứng/Sữa',
-  'Vật tư nông nghiệp',
-] as const;
-
-const IMAGE_POOL = [
-  'https://images.unsplash.com/photo-1542838132-92c53300491e?w=600&q=80',
-  'https://images.unsplash.com/photo-1488459716781-31db52582fe9?w=600&q=80',
-  'https://images.unsplash.com/photo-1518843875459-f738682238a6?w=600&q=80',
-  'https://images.unsplash.com/photo-1567306226416-28f0efdc88ce?w=600&q=80',
-  'https://images.unsplash.com/photo-1574323347407-f5e1ad6d020b?w=600&q=80',
-];
-
-type ProdTpl = { name: string; price: number; unit: string };
-const PRODUCT_POOL: Record<string, ProdTpl[]> = {
-  'Rau củ': [
-    { name: 'Cải thìa hữu cơ', price: 24000, unit: 'kg' },
-    { name: 'Mồng tơi sạch', price: 16000, unit: 'bó' },
-    { name: 'Cà tím dài', price: 28000, unit: 'kg' },
-    { name: 'Củ cải trắng', price: 22000, unit: 'kg' },
-    { name: 'Bắp cải tím', price: 32000, unit: 'kg' },
-    { name: 'Đậu cô ve', price: 38000, unit: 'kg' },
-    { name: 'Mướp hương', price: 26000, unit: 'kg' },
-    { name: 'Khổ qua rừng', price: 45000, unit: 'kg' },
-  ],
-  'Trái cây': [
-    { name: 'Mãng cầu Bà Đen', price: 70000, unit: 'kg' },
-    { name: 'Chôm chôm nhãn', price: 50000, unit: 'kg' },
-    { name: 'Măng cụt Lái Thiêu', price: 90000, unit: 'kg' },
-    { name: 'Ổi ruột hồng', price: 35000, unit: 'kg' },
-    { name: 'Dừa xiêm xanh', price: 18000, unit: 'quả' },
-    { name: 'Mít Thái', price: 40000, unit: 'kg' },
-    { name: 'Đu đủ ruột đỏ', price: 25000, unit: 'kg' },
-    { name: 'Quýt đường', price: 48000, unit: 'kg' },
-  ],
-  'Gạo & ngũ cốc': [
-    { name: 'Gạo tám Điện Biên túi 5kg', price: 160000, unit: 'túi' },
-    { name: 'Đậu phộng rang', price: 70000, unit: 'kg' },
-    { name: 'Hạt chia nhập khẩu', price: 180000, unit: 'kg' },
-    { name: 'Đậu đỏ hạt nhỏ', price: 52000, unit: 'kg' },
-    { name: 'Bột yến mạch', price: 95000, unit: 'kg' },
-    { name: 'Gạo huyết rồng', price: 60000, unit: 'kg' },
-    { name: 'Hạt kê vàng', price: 75000, unit: 'kg' },
-    { name: 'Đậu Hà Lan khô', price: 58000, unit: 'kg' },
-  ],
-  'Thịt/Trứng/Sữa': [
-    { name: 'Trứng gà ác vỉ 20', price: 60000, unit: 'vỉ' },
-    { name: 'Vịt cỏ làm sẵn', price: 120000, unit: 'con' },
-    { name: 'Sườn non heo sạch', price: 160000, unit: 'kg' },
-    { name: 'Sữa chua nhà làm lốc 4', price: 40000, unit: 'lốc' },
-    { name: 'Cá diêu hồng', price: 75000, unit: 'kg' },
-    { name: 'Tôm sú tươi', price: 320000, unit: 'kg' },
-    { name: 'Ức gà phi lê', price: 85000, unit: 'kg' },
-    { name: 'Bơ sữa nhạt thanh trùng', price: 95000, unit: 'hộp' },
-  ],
-  'Vật tư nông nghiệp': [
-    { name: 'Phân NPK bao 50kg', price: 650000, unit: 'bao' },
-    { name: 'Vôi nông nghiệp bao 25kg', price: 80000, unit: 'bao' },
-    { name: 'Bạt phủ chống cỏ cuộn', price: 450000, unit: 'cuộn' },
-    { name: 'Khay ươm hạt 104 lỗ', price: 12000, unit: 'khay' },
-    { name: 'Đầu tưới nhỏ giọt bộ 50', price: 150000, unit: 'bộ' },
-    { name: 'Máy bơm nước mini', price: 1200000, unit: 'cái' },
-    { name: 'Kéo cắt cành nhập khẩu', price: 220000, unit: 'cái' },
-    { name: 'Nhà kính mini lắp ghép', price: 1800000, unit: 'bộ' },
-  ],
-};
+// CATEGORY_NAMES + PRODUCT_CATALOG (tên + ảnh khớp) import từ ./seed-data.
 
 const REVIEW_COMMENTS = [
   'Nông sản tươi rói, đóng gói kỹ, ship nhanh. Rất ưng!',
@@ -162,7 +94,7 @@ async function snapshotSeed2(): Promise<Counts> {
   const [users, products, vouchers, orders, payments, reviews, conversations, messages, behaviors] =
     await Promise.all([
       prisma.user.count({ where: { email: { startsWith: EMAIL_PREFIX } } }),
-      prisma.product.count({ where: { name: { startsWith: NAME_PREFIX } } }),
+      prisma.product.count({ where: { id: { startsWith: `${NS}-prod` } } }),
       prisma.voucher.count({ where: { code: { startsWith: VOUCHER_PREFIX } } }),
       prisma.order.count({ where: { id: { startsWith: `${NS}-order` } } }),
       prisma.payment.count({ where: { id: { startsWith: `${NS}-pay` } } }),
@@ -221,19 +153,19 @@ async function append() {
   const buyers = await Promise.all(
     Array.from({ length: N_BUYERS }, (_, i) => {
       const n = pad(i + 1);
-      return mkUser(`${NS}-buyer-${n}`, `${EMAIL_PREFIX}buyer${n}${EMAIL_DOMAIN}`, `Người Mua S2-${n}`, true, false);
+      return mkUser(`${NS}-buyer-${n}`, `${EMAIL_PREFIX}buyer${n}${EMAIL_DOMAIN}`, PERSON_NAMES[i % PERSON_NAMES.length], true, false);
     }),
   );
   const sellers = await Promise.all(
     Array.from({ length: N_SELLERS }, (_, i) => {
       const n = pad(i + 1);
-      return mkUser(`${NS}-seller-${n}`, `${EMAIL_PREFIX}seller${n}${EMAIL_DOMAIN}`, `Nông Trại S2-${n}`, false, true);
+      return mkUser(`${NS}-seller-${n}`, `${EMAIL_PREFIX}seller${n}${EMAIL_DOMAIN}`, PERSON_NAMES[(i + 5) % PERSON_NAMES.length], false, true);
     }),
   );
   const hybrids = await Promise.all(
     Array.from({ length: N_HYBRIDS }, (_, i) => {
       const n = pad(i + 1);
-      return mkUser(`${NS}-hybrid-${n}`, `${EMAIL_PREFIX}hybrid${n}${EMAIL_DOMAIN}`, `Hộ KD S2-${n}`, true, true);
+      return mkUser(`${NS}-hybrid-${n}`, `${EMAIL_PREFIX}hybrid${n}${EMAIL_DOMAIN}`, PERSON_NAMES[(i + 12) % PERSON_NAMES.length], true, true);
     }),
   );
 
@@ -241,27 +173,30 @@ async function append() {
   const sellingUsers = [...sellers, ...hybrids];
   for (let s = 0; s < sellingUsers.length; s++) {
     const u = sellingUsers[s];
+    const shopName = SHOP_NAMES[s % SHOP_NAMES.length];
     await prisma.profile.upsert({
       where: { user_id: u.id },
-      update: { store_name: `${NAME_PREFIX}Cửa Hàng ${pad(s + 1)}`, is_verified: true },
+      update: { store_name: shopName, is_verified: true },
       create: {
         user_id: u.id,
-        store_name: `${NAME_PREFIX}Cửa Hàng ${pad(s + 1)}`,
+        store_name: shopName,
         address: pick(ADDRESSES, s),
-        description: 'Gian hàng nông sản sạch — dữ liệu demo seed2.',
+        description: 'Gian hàng nông sản sạch, cam kết chất lượng.',
         is_verified: true,
       },
     });
   }
   const buyingUsers = [...buyers, ...hybrids];
 
-  // ── Products (upsert by deterministic id) + Attachment ───────────────────────
+  // ── Products (upsert by deterministic id) + ảnh KHỚP tên ─────────────────────
+  // Tên hiển thị KHÔNG còn [SEED2] — idempotent vẫn an toàn vì upsert theo id cố định.
+  // update path set LẠI name/description ⇒ chạy lại tự xoá tiền tố cũ ở dữ liệu sẵn có.
   const productsBySeller: Record<string, { id: string; price: number; name: string; unit: string }[]> = {};
   for (let s = 0; s < sellingUsers.length; s++) {
     const seller = sellingUsers[s];
     const catName = CATEGORY_NAMES[s % CATEGORY_NAMES.length];
-    const pool = PRODUCT_POOL[catName];
-    const nProducts = 5 + (s % 4); // 5..8
+    const pool = PRODUCT_CATALOG[catName];
+    const nProducts = 5 + (s % 4); // 5..8 (đủ phủ id đã tạo từ các lần chạy trước)
     productsBySeller[seller.id] = [];
 
     for (let p = 0; p < nProducts; p++) {
@@ -269,14 +204,21 @@ async function append() {
       const pid = `${NS}-prod-${pad(s + 1)}-${pad(p + 1)}`;
       const stock = 40 + ((s + p) % 18) * 10;
       const allowNego = p % 3 === 0;
-      const fullName = `${NAME_PREFIX}${tpl.name}`;
       await prisma.product.upsert({
         where: { id: pid },
-        update: { reference_price: tpl.price, stock_quantity: stock, is_active: true, status: ProductStatus.ACTIVE },
+        update: {
+          name: tpl.name, // ghi đè tên cũ (gỡ [SEED2])
+          description: `${tpl.name} — nông sản sạch, cam kết chất lượng.`,
+          reference_price: tpl.price,
+          unit: tpl.unit,
+          stock_quantity: stock,
+          is_active: true,
+          status: ProductStatus.ACTIVE,
+        },
         create: {
           id: pid,
-          name: fullName,
-          description: `${tpl.name} canh tác chuẩn sạch — dữ liệu demo seed2.`,
+          name: tpl.name,
+          description: `${tpl.name} — nông sản sạch, cam kết chất lượng.`,
           reference_price: tpl.price,
           stock_quantity: stock,
           unit: tpl.unit,
@@ -289,23 +231,28 @@ async function append() {
           status: ProductStatus.ACTIVE,
         },
       });
-      // 2 ảnh (Attachment) — upsert by deterministic id
-      for (const k of [0, 1]) {
-        await prisma.attachment.upsert({
-          where: { id: `${NS}-att-${pad(s + 1)}-${pad(p + 1)}-${k}` },
-          update: {},
-          create: {
-            id: `${NS}-att-${pad(s + 1)}-${pad(p + 1)}-${k}`,
-            url: pick(IMAGE_POOL, p + k),
-            file_type: 'IMAGE',
-            target_id: pid,
-            target_type: TargetType.PRODUCT,
-          },
-        });
-      }
+
+      // Refresh ảnh KHỚP tên — CHỈ sản phẩm seed-owned (id seed2-prod-*): xoá ảnh cũ
+      // (kể cả ảnh generic/mismatch từ lần trước) rồi tạo lại 1 ảnh đúng sản phẩm.
+      await prisma.attachment.deleteMany({ where: { target_id: pid, target_type: TargetType.PRODUCT } });
+      await prisma.attachment.create({
+        data: {
+          id: `${NS}-att-${pad(s + 1)}-${pad(p + 1)}-0`,
+          url: tpl.image,
+          file_type: 'IMAGE',
+          target_id: pid,
+          target_type: TargetType.PRODUCT,
+        },
+      });
+
       productsBySeller[seller.id].push({ id: pid, price: tpl.price, name: tpl.name, unit: tpl.unit });
     }
   }
+
+  const productsTouched = Object.values(productsBySeller).reduce((a, arr) => a + arr.length, 0);
+  console.log(`   🥬 Sản phẩm seed2: ${productsTouched} (đã set tên thật + 1 ảnh khớp/sp)`);
+  console.log(`   🖼️  Ảnh seed2 refresh: ${productsTouched}`);
+  console.log(`   👤 Users seed2 upsert: ${buyers.length + sellers.length + hybrids.length} · 🏪 shops: ${sellingUsers.length}`);
 
   // ── Vouchers (upsert by unique [seller_id, code]) ────────────────────────────
   // "Global-ish" welcome — gắn seller seed2 đầu tiên (schema không có voucher toàn sàn)

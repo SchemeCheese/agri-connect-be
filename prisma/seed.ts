@@ -34,6 +34,7 @@ import {
   TargetType,
 } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
+import { PERSON_NAMES, SHOP_NAMES, PRODUCT_CATALOG } from './seed-data';
 
 const prisma = new PrismaClient();
 
@@ -298,7 +299,7 @@ async function seed() {
     Array.from({ length: N_BUYERS }, (_, i) => {
       const n = pad(i + 1);
       return prisma.user.create({
-        data: baseUser(`${SEED_EMAIL_PREFIX}buyer${n}${EMAIL_DOMAIN}`, `Người Mua ${n}`, true, false),
+        data: baseUser(`${SEED_EMAIL_PREFIX}buyer${n}${EMAIL_DOMAIN}`, PERSON_NAMES[i % PERSON_NAMES.length], true, false),
       });
     }),
   );
@@ -309,12 +310,12 @@ async function seed() {
       const n = pad(i + 1);
       return prisma.user.create({
         data: {
-          ...baseUser(`${SEED_EMAIL_PREFIX}seller${n}${EMAIL_DOMAIN}`, `Nông Trại ${n}`, false, true),
+          ...baseUser(`${SEED_EMAIL_PREFIX}seller${n}${EMAIL_DOMAIN}`, PERSON_NAMES[(i + 5) % PERSON_NAMES.length], false, true),
           profile: {
             create: {
-              store_name: `[SEED] Nông Trại Sạch ${n}`,
+              store_name: SHOP_NAMES[i % SHOP_NAMES.length],
               address: pick(ADDRESSES, i),
-              description: 'Cửa hàng nông sản sạch — dữ liệu demo.',
+              description: 'Cửa hàng nông sản sạch, cam kết chất lượng.',
               is_verified: true,
             },
           },
@@ -329,10 +330,10 @@ async function seed() {
       const n = pad(i + 1);
       return prisma.user.create({
         data: {
-          ...baseUser(`${SEED_EMAIL_PREFIX}hybrid${n}${EMAIL_DOMAIN}`, `Hộ Kinh Doanh ${n}`, true, true),
+          ...baseUser(`${SEED_EMAIL_PREFIX}hybrid${n}${EMAIL_DOMAIN}`, PERSON_NAMES[(i + 12) % PERSON_NAMES.length], true, true),
           profile: {
             create: {
-              store_name: `[SEED] Vựa Nông Sản ${n}`,
+              store_name: SHOP_NAMES[(i + 6) % SHOP_NAMES.length],
               address: pick(ADDRESSES, i + 2),
               description: 'Vừa mua vừa bán — tài khoản demo lưỡng vai.',
               is_verified: true,
@@ -353,7 +354,7 @@ async function seed() {
   for (let s = 0; s < sellingUsers.length; s++) {
     const seller = sellingUsers[s];
     const catName = CATEGORY_NAMES[s % CATEGORY_NAMES.length];
-    const pool = PRODUCT_POOL[catName];
+    const pool = PRODUCT_CATALOG[catName];
     const nProducts = 5 + (s % 6); // 5..10
     productsBySeller[seller.id] = [];
 
@@ -363,8 +364,8 @@ async function seed() {
       const allowNego = p % 3 === 0; // ~1/3 sản phẩm cho thương lượng
       const product = await prisma.product.create({
         data: {
-          name: `${SEED_NAME_PREFIX}${tpl.name}`,
-          description: `${tpl.name} chất lượng cao, canh tác theo tiêu chuẩn sạch. (Dữ liệu demo SEED)`,
+          name: tpl.name, // KHÔNG còn tiền tố [SEED] — nhận diện seed qua email người bán
+          description: `${tpl.name} — nông sản sạch, cam kết chất lượng.`,
           reference_price: tpl.price,
           stock_quantity: stock,
           unit: tpl.unit,
@@ -377,14 +378,14 @@ async function seed() {
           status: ProductStatus.ACTIVE,
         },
       });
-      // 2 ảnh / sản phẩm (Attachment, target_type = PRODUCT)
-      await prisma.attachment.createMany({
-        data: [0, 1].map((k) => ({
-          url: pick(IMAGE_POOL, p + k),
+      // 1 ảnh KHỚP tên sản phẩm (Attachment, target_type = PRODUCT)
+      await prisma.attachment.create({
+        data: {
+          url: tpl.image,
           file_type: 'IMAGE',
           target_id: product.id,
           target_type: TargetType.PRODUCT,
-        })),
+        },
       });
       productsBySeller[seller.id].push({ id: product.id, price: tpl.price, name: tpl.name, unit: tpl.unit });
       counts.products++;
