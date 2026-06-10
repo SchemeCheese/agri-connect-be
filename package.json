@@ -11,6 +11,7 @@
     "start": "nest start",
     "seed": "prisma db seed",
     "seed:append": "ts-node prisma/seed-append.ts",
+    "seed:admin": "ts-node prisma/seed-admin.ts",
     "start:dev": "nest start --watch",
     "start:debug": "nest start --debug --watch",
     "start:prod": "node dist/src/main",

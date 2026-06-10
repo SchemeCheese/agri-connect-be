@@ -14,36 +14,36 @@ datasource db {
 
 // --- Enum định nghĩa theo thiết kế của bạn ---
 enum OrderStatus {
-  PENDING          // Chờ người bán xác nhận
-  CONFIRMED        // Người bán đã xác nhận
-  SHIPPING         // Đang giao hàng
-  COMPLETED        // Hoàn thành (buyer xác nhận nhận) — alias cho DELIVERED
-  CANCELLED        // Đã hủy
-  ISSUE_REPORTED   // Có sự cố (buyer báo chưa nhận) — DISPUTED state
-  FAILED           // Giao thất bại (sau khi seller xác nhận)
-  RETURNED         // Đơn COD báo "chưa nhận hàng" — không có tiền để hoàn
-  REFUND_PENDING   // Đơn MoMo đã PAID, đang chờ admin/job gọi MoMo refund API
-  REFUNDED         // MoMo refund API trả thành công, tiền đã trả về buyer
+  PENDING // Chờ người bán xác nhận
+  CONFIRMED // Người bán đã xác nhận
+  SHIPPING // Đang giao hàng
+  COMPLETED // Hoàn thành (buyer xác nhận nhận) — alias cho DELIVERED
+  CANCELLED // Đã hủy
+  ISSUE_REPORTED // Có sự cố (buyer báo chưa nhận) — DISPUTED state
+  FAILED // Giao thất bại (sau khi seller xác nhận)
+  RETURNED // Đơn COD báo "chưa nhận hàng" — không có tiền để hoàn
+  REFUND_PENDING // Đơn MoMo đã PAID, đang chờ admin/job gọi MoMo refund API
+  REFUNDED // MoMo refund API trả thành công, tiền đã trả về buyer
 }
 
 enum PaymentStatus {
-  UNPAID    // Chưa thanh toán (COD chờ nhận / online chờ)
-  PAID      // Đã thanh toán xong
+  UNPAID // Chưa thanh toán (COD chờ nhận / online chờ)
+  PAID // Đã thanh toán xong
   REFUNDING // Đang hoàn tiền (online đã trả trước, hàng thất lạc)
-  REFUNDED  // Đã hoàn tiền xong
-  FAILED    // Thanh toán thất bại
+  REFUNDED // Đã hoàn tiền xong
+  FAILED // Thanh toán thất bại
 }
 
 enum PaymentMethod {
-  COD      // Thanh toán khi nhận hàng
-  QR_CODE  // QR ngân hàng
-  MOMO     // Ví MoMo
-  ZALOPAY  // ZaloPay
+  COD // Thanh toán khi nhận hàng
+  QR_CODE // QR ngân hàng
+  MOMO // Ví MoMo
+  ZALOPAY // ZaloPay
 }
 
 enum PaymentType {
-  PAYMENT  // Bản ghi thu tiền (mặc định)
-  REFUND   // Bản ghi hoàn tiền — log riêng để đối soát
+  PAYMENT // Bản ghi thu tiền (mặc định)
+  REFUND // Bản ghi hoàn tiền — log riêng để đối soát
 }
 
 enum TargetType {
@@ -54,21 +54,21 @@ enum TargetType {
 }
 
 enum DiscountType {
-  PERCENT  // Giảm theo %
-  FIXED    // Giảm tiền cố định
+  PERCENT // Giảm theo %
+  FIXED // Giảm tiền cố định
 }
 
 enum MessageType {
-  TEXT               // Tin nhắn thường
-  IMAGE              // Tin nhắn chỉ chứa ảnh (image_url bắt buộc)
-  NEGOTIATION_QUOTE  // Card báo giá từ seller
-  SYSTEM             // Tin nhắn hệ thống (tự động)
+  TEXT // Tin nhắn thường
+  IMAGE // Tin nhắn chỉ chứa ảnh (image_url bắt buộc)
+  NEGOTIATION_QUOTE // Card báo giá từ seller
+  SYSTEM // Tin nhắn hệ thống (tự động)
 }
 
 enum QuoteStatus {
-  PENDING   // Chờ buyer phản hồi
-  ACCEPTED  // Buyer chấp nhận → tạo đơn
-  REJECTED  // Buyer từ chối
+  PENDING // Chờ buyer phản hồi
+  ACCEPTED // Buyer chấp nhận → tạo đơn
+  REJECTED // Buyer từ chối
 }
 
 enum BehaviorAction {
@@ -80,10 +80,10 @@ enum BehaviorAction {
 }
 
 enum ProductStatus {
-  ACTIVE        // stock > 0, seller publishing
-  OUT_OF_STOCK  // stock = 0, not manually removed
-  INACTIVE      // seller temporarily deactivated, can be restored
-  DELETED       // seller soft-deleted; row preserved for history/orders
+  ACTIVE // stock > 0, seller publishing
+  OUT_OF_STOCK // stock = 0, not manually removed
+  INACTIVE // seller temporarily deactivated, can be restored
+  DELETED // seller soft-deleted; row preserved for history/orders
 }
 
 // --- Enum mới cho OTP (Theo repo mẫu) ---
@@ -92,27 +92,51 @@ enum AccountIdentifier {
   PHONE
 }
 
+// --- Hệ thống tranh chấp / khiếu nại (Dispute) ---
+enum DisputeStatus {
+  PENDING_SELLER_RESPONSE // Buyer gửi tố cáo, chờ Seller giải trình
+  UNDER_ADMIN_REVIEW // Seller đã gửi bằng chứng, chờ Admin phân xử
+  RESOLVED // Đã xử lý xong
+  CLOSED // Đã đóng ca (hủy / hết hạn)
+}
+
+enum DisputeOutcome {
+  PENDING
+  SELLER_FAULT // Lỗi người bán
+  BUYER_FAULT // Lỗi người mua
+  SHIPPING_FAULT // Lỗi vận chuyển (giả định)
+  INSUFFICIENT_EVIDENCE // Không đủ bằng chứng
+}
+
+enum ResolutionAction {
+  NONE
+  REFUND_BUYER // Hoàn tiền buyer
+  RELEASE_PAYMENT_TO_SELLER // Giải ngân cho seller
+  PARTIAL_REFUND // Hoàn một phần
+  CLOSE_WITHOUT_ACTION // Đóng, giữ nguyên
+}
+
 // --- Các Model chính ---
 
 model User {
-  id             String    @id @default(cuid())
-  email          String    @unique
-  password_hash  String
-  is_buyer       Boolean   @default(false)
-  is_seller      Boolean   @default(false)
-  is_admin       Boolean   @default(false)
-  full_name      String
-  phone_number   String?
+  id            String  @id @default(cuid())
+  email         String  @unique
+  password_hash String
+  is_buyer      Boolean @default(false)
+  is_seller     Boolean @default(false)
+  is_admin      Boolean @default(false)
+  full_name     String
+  phone_number  String?
 
   // --- THÊM TRƯỜNG XÁC THỰC ---
-  verified_email Boolean   @default(false)   // alias for spec's email_verified
+  verified_email Boolean @default(false) // alias for spec's email_verified
 
   // ─── Firebase / multi-provider sync ──────────────────────────────────────
-  firebase_uid   String?   @unique           // Firebase Auth uid — present once user passes through Firebase (Google or email/password via Firebase)
-  display_name   String?                     // Firebase displayName / profile name
-  photo_url      String?                     // Firebase photoURL
-  provider       String?                     // 'password' | 'google'
-  last_login_at  DateTime?                   // Updated on every successful auth
+  firebase_uid  String?   @unique // Firebase Auth uid — present once user passes through Firebase (Google or email/password via Firebase)
+  display_name  String? // Firebase displayName / profile name
+  photo_url     String? // Firebase photoURL
+  provider      String? // 'password' | 'google'
+  last_login_at DateTime? // Updated on every successful auth
 
   // ─── Refresh token rotation ──────────────────────────────────────────────
   // bcrypt hash của SHA-256(refresh_token). Pre-hash bằng SHA-256 vì JWT dài hơn
@@ -120,83 +144,85 @@ model User {
   // trùng 72 byte đầu (header + sub) và rotation mất tác dụng. null = đã logout.
   refresh_token_hash String?
 
-  is_active      Boolean   @default(true)
-  created_at     DateTime  @default(now())
-  updated_at     DateTime  @updatedAt
+  is_active  Boolean  @default(true)
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
 
-  profile        Profile?
-  products       Product[]
-  buy_orders     Order[]         @relation("BuyerOrders")
-  sell_orders    Order[]         @relation("SellerOrders")
-  payments       Payment[]
-  sent_messages  ChatMessage[]
-  conv_user1     Conversation[]  @relation("User1")
-  conv_user2     Conversation[]  @relation("User2")
-  reviews        Review[]
+  profile         Profile?
+  products        Product[]
+  buy_orders      Order[]        @relation("BuyerOrders")
+  sell_orders     Order[]        @relation("SellerOrders")
+  payments        Payment[]
+  sent_messages   ChatMessage[]
+  conv_user1      Conversation[] @relation("User1")
+  conv_user2      Conversation[] @relation("User2")
+  reviews         Review[]
   vouchers        Voucher[]
   saved_vouchers  SavedVoucher[]
-  behaviors      UserBehavior[]
+  behaviors       UserBehavior[]
+  buyer_disputes  Dispute[]      @relation("BuyerDisputes")
+  seller_disputes Dispute[]      @relation("SellerDisputes")
 
   // Liên kết với bảng Verification
-  verifications  Verification[]
+  verifications        Verification[]
   recommendation_cache RecommendationCache?
-  ai_sessions    AISession[]
-  checkout_sessions CheckoutSession[]
+  ai_sessions          AISession[]
+  checkout_sessions    CheckoutSession[]
 }
 
 model Profile {
-  id             String   @id @default(cuid())
-  user_id        String   @unique
-  user           User     @relation(fields: [user_id], references: [id])
-  store_name     String?
-  address        String?
-  description    String?  @db.Text
-  is_verified    Boolean  @default(false)
-  cover_url      String?           // Ảnh bìa của shop
-  banners1       String[] @default([])  // Banner dưới thông tin shop (tối đa 6 ảnh)
-  banners2       String[] @default([])  // Banner dưới "Gợi ý cho bạn" (tối đa 6 ảnh)
+  id          String   @id @default(cuid())
+  user_id     String   @unique
+  user        User     @relation(fields: [user_id], references: [id])
+  store_name  String?
+  address     String?
+  description String?  @db.Text
+  is_verified Boolean  @default(false)
+  cover_url   String? // Ảnh bìa của shop
+  banners1    String[] @default([]) // Banner dưới thông tin shop (tối đa 6 ảnh)
+  banners2    String[] @default([]) // Banner dưới "Gợi ý cho bạn" (tối đa 6 ảnh)
 
   // ─── Shop location / Google Maps ────────────────────────────────────────
-  shop_location_name    String?                       // Friendly label, e.g. "Nông trại Đà Lạt"
-  shop_google_maps_url  String?                       // Raw URL pasted by seller
-  shop_latitude         Decimal? @db.Decimal(10, 7)   // Parsed from URL or autocomplete
-  shop_longitude        Decimal? @db.Decimal(10, 7)
-  place_id              String?                       // Google Places place_id, if available
-  created_at     DateTime @default(now())
-  updated_at     DateTime @updatedAt
+  shop_location_name   String? // Friendly label, e.g. "Nông trại Đà Lạt"
+  shop_google_maps_url String? // Raw URL pasted by seller
+  shop_latitude        Decimal? @db.Decimal(10, 7) // Parsed from URL or autocomplete
+  shop_longitude       Decimal? @db.Decimal(10, 7)
+  place_id             String? // Google Places place_id, if available
+  created_at           DateTime @default(now())
+  updated_at           DateTime @updatedAt
 }
 
 model Category {
-  id             Int       @id @default(autoincrement())
-  name           String    @unique
+  id             Int        @id @default(autoincrement())
+  name           String     @unique
   parent_id      Int?
-  parent         Category? @relation("SubCategories", fields: [parent_id], references: [id])
+  parent         Category?  @relation("SubCategories", fields: [parent_id], references: [id])
   sub_categories Category[] @relation("SubCategories")
   products       Product[]
-  created_at     DateTime  @default(now())
+  created_at     DateTime   @default(now())
 }
 
 model Product {
-  id              String      @id @default(cuid())
-  seller_id       String
-  seller          User        @relation(fields: [seller_id], references: [id])
-  category_id     Int
-  category        Category    @relation(fields: [category_id], references: [id])
-  name            String
-  description     String?     @db.Text
-  reference_price Decimal     @db.Decimal(10, 2)
-  stock_quantity  Decimal     @db.Decimal(10, 2)
-  unit            String
-  location             String?
-  certification        String?
-  min_negotiation_qty  Decimal?    @db.Decimal(10, 2) // null = không cho thương lượng; > 0 = số lượng tối thiểu
-  is_active            Boolean     @default(true)     // kept in sync with status: ACTIVE → true, anything else → false
-  status               ProductStatus @default(ACTIVE) // authoritative lifecycle state
-  created_at           DateTime    @default(now())
-  updated_at           DateTime    @updatedAt
-  order_items          OrderItem[]
-  context_messages     ChatMessage[]
-  embedding            ProductEmbedding?   // Phase 3 — semantic search
+  id                  String            @id @default(cuid())
+  seller_id           String
+  seller              User              @relation(fields: [seller_id], references: [id])
+  category_id         Int
+  category            Category          @relation(fields: [category_id], references: [id])
+  name                String
+  description         String?           @db.Text
+  reference_price     Decimal           @db.Decimal(10, 2)
+  stock_quantity      Decimal           @db.Decimal(10, 2)
+  unit                String
+  location            String?
+  certification       String?
+  min_negotiation_qty Decimal?          @db.Decimal(10, 2) // null = không cho thương lượng; > 0 = số lượng tối thiểu
+  is_active           Boolean           @default(true) // kept in sync with status: ACTIVE → true, anything else → false
+  status              ProductStatus     @default(ACTIVE) // authoritative lifecycle state
+  created_at          DateTime          @default(now())
+  updated_at          DateTime          @updatedAt
+  order_items         OrderItem[]
+  context_messages    ChatMessage[]
+  embedding           ProductEmbedding? // Phase 3 — semantic search
 
   // Index hỗ trợ AI tools (search_products, recommend_sellers) — ILIKE/contains trên name
   @@index([is_active, name])
@@ -205,35 +231,36 @@ model Product {
 }
 
 model Order {
-  id                String        @id @default(cuid())
-  buyer_id          String
-  buyer             User          @relation("BuyerOrders", fields: [buyer_id], references: [id])
-  seller_id         String
-  seller            User          @relation("SellerOrders", fields: [seller_id], references: [id])
-  status            OrderStatus   @default(PENDING)
-  payment_method    PaymentMethod @default(COD)
-  final_total_price Decimal       @db.Decimal(10, 2)
-  shipping_address  String
-  tracking_code     String?
-  note              String?       // Ghi chú khi báo sự cố
-  shipped_at        DateTime?     // Thời điểm chuyển sang SHIPPING — dùng để tính timer báo sự cố
-  voucher_id        String?       // Voucher đã áp dụng
-  voucher           Voucher?      @relation(fields: [voucher_id], references: [id])
-  discount_amount   Decimal?      @db.Decimal(10, 2)  // Số tiền đã giảm
+  id                   String           @id @default(cuid())
+  buyer_id             String
+  buyer                User             @relation("BuyerOrders", fields: [buyer_id], references: [id])
+  seller_id            String
+  seller               User             @relation("SellerOrders", fields: [seller_id], references: [id])
+  status               OrderStatus      @default(PENDING)
+  payment_method       PaymentMethod    @default(COD)
+  final_total_price    Decimal          @db.Decimal(10, 2)
+  shipping_address     String
+  tracking_code        String?
+  note                 String? // Ghi chú khi báo sự cố
+  shipped_at           DateTime? // Thời điểm chuyển sang SHIPPING — dùng để tính timer báo sự cố
+  voucher_id           String? // Voucher đã áp dụng
+  voucher              Voucher?         @relation(fields: [voucher_id], references: [id])
+  discount_amount      Decimal?         @db.Decimal(10, 2) // Số tiền đã giảm
   // Nhóm nhiều đơn (nhiều shop) vào 1 lần thanh toán MoMo. Nullable để tương thích
   // ngược với đơn cũ; checkout mới luôn gán (single-shop = session 1 đơn).
-  checkout_session_id String?
-  checkout_session    CheckoutSession? @relation(fields: [checkout_session_id], references: [id])
+  checkout_session_id  String?
+  checkout_session     CheckoutSession? @relation(fields: [checkout_session_id], references: [id])
   // Loose reference tới ChatMessage(NEGOTIATION_QUOTE).id mà đơn này được tạo từ
   // (pay-from-chat). Nullable: đơn thường = NULL. KHÔNG unique — cho phép tạo đơn
   // mới khi đơn cũ của cùng quote bị CANCELLED/FAILED (retry thanh toán) hoặc
   // split-shipment B2B sau này. Quy tắc "tối đa 1 đơn ACTIVE / quote" enforce ở service layer.
   negotiation_quote_id String?
-  created_at        DateTime      @default(now())
-  updated_at        DateTime      @updatedAt
-  order_items       OrderItem[]
-  payments          Payment[]
-  reviews           Review[]
+  created_at           DateTime         @default(now())
+  updated_at           DateTime         @updatedAt
+  order_items          OrderItem[]
+  payments             Payment[]
+  reviews              Review[]
+  dispute              Dispute?
 
   @@index([checkout_session_id])
   @@index([negotiation_quote_id])
@@ -248,8 +275,8 @@ enum CheckoutSessionStatus {
   PENDING
   PAID
   FAILED
-  PARTIALLY_REFUNDED  // Một phần đơn trong nhóm đã hoàn tiền
-  REFUNDED            // Tất cả đơn trong nhóm đã hoàn tiền
+  PARTIALLY_REFUNDED // Một phần đơn trong nhóm đã hoàn tiền
+  REFUNDED // Tất cả đơn trong nhóm đã hoàn tiền
 }
 
 model CheckoutSession {
@@ -258,7 +285,7 @@ model CheckoutSession {
   buyer         User                  @relation(fields: [buyer_id], references: [id])
   total_amount  Decimal               @db.Decimal(10, 2)
   status        CheckoutSessionStatus @default(PENDING)
-  momo_trans_id String?               // MoMo transId của giao dịch nhóm (sau IPN thành công)
+  momo_trans_id String? // MoMo transId của giao dịch nhóm (sau IPN thành công)
   created_at    DateTime              @default(now())
   updated_at    DateTime              @updatedAt
   orders        Order[]
@@ -288,10 +315,10 @@ model Payment {
   amount            Decimal       @db.Decimal(10, 2)
   payment_method    PaymentMethod
   status            PaymentStatus @default(UNPAID)
-  payment_type      PaymentType   @default(PAYMENT)  // PAYMENT = thu tiền, REFUND = bản ghi hoàn tiền
+  payment_type      PaymentType   @default(PAYMENT) // PAYMENT = thu tiền, REFUND = bản ghi hoàn tiền
   payment_proof_url String?
-  transaction_ref   String?       // Mã giao dịch từ MoMo/ZaloPay/QR
-  momo_trans_id     String?       // MoMo transId từ IPN thành công — dùng cho refund
+  transaction_ref   String? // Mã giao dịch từ MoMo/ZaloPay/QR
+  momo_trans_id     String? // MoMo transId từ IPN thành công — dùng cho refund
   created_at        DateTime      @default(now())
   updated_at        DateTime      @updatedAt
 
@@ -327,7 +354,7 @@ model ChatMessage {
   // Sản phẩm được đính kèm vào tin nhắn (SYSTEM: "Chat ngay", NEGOTIATION_QUOTE: card báo giá)
   // FE dùng để hiển thị badge sản phẩm người dùng đang hỏi/thương lượng
   context_product_id String?
-  context_product    Product?  @relation(fields: [context_product_id], references: [id])
+  context_product    Product? @relation(fields: [context_product_id], references: [id])
 
   // ─── Chỉ dùng khi message_type = NEGOTIATION_QUOTE ──────────────────────
   quote_product_id   String?
@@ -341,29 +368,29 @@ model ChatMessage {
   quote_status       QuoteStatus?
 
   // Idempotency key — FE/APP sinh UUID khi gửi để chống duplicate khi retry/reconnect
-  client_message_id  String?
+  client_message_id String?
 
   // URL ảnh đính kèm — set khi message_type = IMAGE (hoặc TEXT có ảnh)
   // Chỉ hỗ trợ 1 ảnh / message để đơn giản hóa Phase 1
-  image_url          String?
+  image_url String?
 
-  created_at      DateTime     @default(now())
+  created_at DateTime @default(now())
 
   @@unique([sender_id, client_message_id])
   @@index([conversation_id, created_at])
 }
 
 model Review {
-  id                  String    @id @default(cuid())
-  order_id            String
-  order               Order     @relation(fields: [order_id], references: [id])
-  reviewer_id         String
-  user                User      @relation(fields: [reviewer_id], references: [id])
-  rating              Int       @default(5)
-  comment             String?   @db.Text
-  seller_reply        String?   @db.Text
-  seller_replied_at   DateTime?
-  created_at          DateTime  @default(now())
+  id                String    @id @default(cuid())
+  order_id          String
+  order             Order     @relation(fields: [order_id], references: [id])
+  reviewer_id       String
+  user              User      @relation(fields: [reviewer_id], references: [id])
+  rating            Int       @default(5)
+  comment           String?   @db.Text
+  seller_reply      String?   @db.Text
+  seller_replied_at DateTime?
+  created_at        DateTime  @default(now())
 }
 
 model Attachment {
@@ -378,25 +405,25 @@ model Attachment {
 }
 
 model Voucher {
-  id                 String       @id @default(cuid())
-  seller_id          String
-  seller             User         @relation(fields: [seller_id], references: [id])
-  code               String       // Mã voucher (unique per seller)
-  discount_type      DiscountType
-  discount_value     Decimal      @db.Decimal(10, 2)  // Ví dụ: 10 (%) hoặc 50000 (đồng)
-  min_order_value    Decimal      @db.Decimal(10, 2)  // Đơn tối thiểu
-  max_discount_amount Decimal     @db.Decimal(10, 2)  // Giảm tối đa (dùng khi PERCENT)
-  valid_from         DateTime
-  valid_to           DateTime
-  usage_limit        Int          @default(100)
-  used_count         Int          @default(0)
-  is_active          Boolean      @default(true)
-  created_at         DateTime     @default(now())
-  updated_at         DateTime     @updatedAt
-  saved_vouchers     SavedVoucher[]
-  orders             Order[]
+  id                  String         @id @default(cuid())
+  seller_id           String
+  seller              User           @relation(fields: [seller_id], references: [id])
+  code                String // Mã voucher (unique per seller)
+  discount_type       DiscountType
+  discount_value      Decimal        @db.Decimal(10, 2) // Ví dụ: 10 (%) hoặc 50000 (đồng)
+  min_order_value     Decimal        @db.Decimal(10, 2) // Đơn tối thiểu
+  max_discount_amount Decimal        @db.Decimal(10, 2) // Giảm tối đa (dùng khi PERCENT)
+  valid_from          DateTime
+  valid_to            DateTime
+  usage_limit         Int            @default(100)
+  used_count          Int            @default(0)
+  is_active           Boolean        @default(true)
+  created_at          DateTime       @default(now())
+  updated_at          DateTime       @updatedAt
+  saved_vouchers      SavedVoucher[]
+  orders              Order[]
 
-  @@unique([seller_id, code])  // Mã unique theo từng shop
+  @@unique([seller_id, code]) // Mã unique theo từng shop
   @@index([seller_id])
   @@index([code])
 }
@@ -409,7 +436,7 @@ model SavedVoucher {
   voucher    Voucher  @relation(fields: [voucher_id], references: [id])
   created_at DateTime @default(now())
 
-  @@unique([user_id, voucher_id])  // Mỗi user chỉ lưu 1 lần
+  @@unique([user_id, voucher_id]) // Mỗi user chỉ lưu 1 lần
 }
 
 // --- THÊM BẢNG LƯU MÃ OTP (VERIFICATION) ---
@@ -472,8 +499,8 @@ model AISession {
   user_id           String
   user              User        @relation(fields: [user_id], references: [id], onDelete: Cascade)
   mode              AIMode      @default(BUYER)
-  context           Json?       // { productId?, shopId?, conversationId? }
-  summary           String?     @db.Text  // Tóm tắt messages cũ khi > 12 messages
+  context           Json? // { productId?, shopId?, conversationId? }
+  summary           String?     @db.Text // Tóm tắt messages cũ khi > 12 messages
   total_tokens_used Int         @default(0)
   messages          AIMessage[]
   created_at        DateTime    @default(now())
@@ -489,10 +516,10 @@ model AIMessage {
   role         AIRole
   content      String    @db.Text
   tokens_used  Int?
-  model_used   String?   // "llama-3.1-8b-instant" | "llama-3.3-70b-versatile"
-  intent       String?   // Intent được classify cho message này
+  model_used   String? // "llama-3.1-8b-instant" | "llama-3.3-70b-versatile"
+  intent       String? // Intent được classify cho message này
   tools_called String[]  @default([])
-  rag_sources  Json?     // { productIds: [], sellerIds: [] } — Phase 2
+  rag_sources  Json? // { productIds: [], sellerIds: [] } — Phase 2
   created_at   DateTime  @default(now())
 
   @@index([session_id, created_at])
@@ -507,10 +534,42 @@ model ProductEmbedding {
   product_id    String                     @unique
   product       Product                    @relation(fields: [product_id], references: [id], onDelete: Cascade)
   embedding     Unsupported("vector(384)") // 384-dim: paraphrase-multilingual-MiniLM-L12-v2
-  content       String                     @db.Text  // source text that was embedded
+  content       String                     @db.Text // source text that was embedded
   model_version String                     @default("paraphrase-multilingual-MiniLM-L12-v2")
   updated_at    DateTime                   @updatedAt
 
   @@index([product_id])
 }
 
+// ─── Dispute / Khiếu nại (Evidence-based resolution) ─────────────────────────
+model Dispute {
+  id        String @id @default(cuid())
+  order_id  String @unique
+  order     Order  @relation(fields: [order_id], references: [id], onDelete: Cascade)
+  buyer_id  String
+  buyer     User   @relation("BuyerDisputes", fields: [buyer_id], references: [id])
+  seller_id String
+  seller    User   @relation("SellerDisputes", fields: [seller_id], references: [id])
+
+  status       DisputeStatus    @default(PENDING_SELLER_RESPONSE)
+  outcome      DisputeOutcome   @default(PENDING)
+  action_taken ResolutionAction @default(NONE)
+
+  // Phía người mua
+  buyer_reason String   @db.Text
+  buyer_images String[] @default([])
+  buyer_video  String?
+
+  // Phía người bán
+  seller_explanation String?  @db.Text
+  seller_images      String[] @default([])
+  seller_video       String?
+
+  admin_notes String?   @db.Text
+  resolved_at DateTime?
+  created_at  DateTime  @default(now())
+  updated_at  DateTime  @updatedAt
+
+  @@index([status])
+  @@index([order_id])
+}

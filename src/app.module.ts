@@ -17,6 +17,7 @@ import { PaymentsModule } from './modules/payments/payments.module';
 import { RecommendationsModule } from './modules/recommendations/recommendations.module';
 import { BehaviorsModule } from './modules/behaviors/behaviors.module';
 import { AIAssistantModule } from './modules/ai-assistant/ai-assistant.module';
+import { AdminModule } from './modules/admin/admin.module';
 
 @Module({
   imports: [
@@ -36,6 +37,7 @@ import { AIAssistantModule } from './modules/ai-assistant/ai-assistant.module';
     RecommendationsModule,
     BehaviorsModule,
     AIAssistantModule,
+    AdminModule,
   ],
   controllers: [AppController],
   providers: [AppService],
