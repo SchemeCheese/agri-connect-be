@@ -172,4 +172,132 @@ export class AdminService {
       select: { id: true, name: true, status: true, is_active: true },
     });
   }
+
+  // ─── 360° user details (hiệu năng cao: count/aggregate/groupBy, không nạp mảng vô hạn) ─
+  async userDetails(id: string) {
+    const user = await this.db.user.findUnique({
+      where: { id },
+      // CHỈ trả field an toàn — KHÔNG bao giờ password_hash / refresh_token_hash.
+      select: {
+        id: true,
+        email: true,
+        full_name: true,
+        phone_number: true,
+        verified_email: true,
+        is_active: true,
+        is_admin: true,
+        is_buyer: true,
+        is_seller: true,
+        created_at: true,
+      },
+    });
+    if (!user) throw new NotFoundException('Người dùng không tồn tại.');
+
+    const ORDER_STATUSES: OrderStatus[] = [
+      OrderStatus.PENDING,
+      OrderStatus.CONFIRMED,
+      OrderStatus.SHIPPING,
+      OrderStatus.COMPLETED,
+      OrderStatus.CANCELLED,
+      OrderStatus.ISSUE_REPORTED,
+      OrderStatus.FAILED,
+      OrderStatus.RETURNED,
+      OrderStatus.REFUND_PENDING,
+      OrderStatus.REFUNDED,
+    ];
+    const PRODUCT_STATUSES: ProductStatus[] = [
+      ProductStatus.ACTIVE,
+      ProductStatus.OUT_OF_STOCK,
+      ProductStatus.INACTIVE,
+      ProductStatus.DELETED,
+    ];
+
+    type OrderGroup = { status: OrderStatus; _count: { _all: number } };
+    type ProductGroup = { status: ProductStatus; _count: { _all: number } };
+    const orderMap = (rows: OrderGroup[]) => {
+      const m = Object.fromEntries(ORDER_STATUSES.map((s) => [s, 0])) as Record<OrderStatus, number>;
+      rows.forEach((r) => (m[r.status] = r._count._all));
+      return m;
+    };
+    const productMap = (rows: ProductGroup[]) => {
+      const m = Object.fromEntries(PRODUCT_STATUSES.map((s) => [s, 0])) as Record<ProductStatus, number>;
+      rows.forEach((r) => (m[r.status] = r._count._all));
+      return m;
+    };
+
+    const [
+      buyerTotalOrders,
+      buyerSpentAgg,
+      buyerGrouped,
+      recentOrders,
+      reviewsWrittenCount,
+      sellerTotalProducts,
+      productGrouped,
+      sellerTotalOrders,
+      sellerRevenueAgg,
+      sellerOrderGrouped,
+      recentProducts,
+      recentSales,
+    ] = await Promise.all([
+      this.db.order.count({ where: { buyer_id: id } }),
+      this.db.order.aggregate({ _sum: { final_total_price: true }, where: { buyer_id: id, status: OrderStatus.COMPLETED } }),
+      this.db.order.groupBy({ by: ['status'], where: { buyer_id: id }, _count: { _all: true } }),
+      this.db.order.findMany({
+        where: { buyer_id: id },
+        orderBy: { created_at: 'desc' },
+        take: 5,
+        select: {
+          id: true,
+          status: true,
+          final_total_price: true,
+          created_at: true,
+          seller: { select: { id: true, full_name: true } },
+        },
+      }),
+      this.db.review.count({ where: { reviewer_id: id } }),
+      this.db.product.count({ where: { seller_id: id } }),
+      this.db.product.groupBy({ by: ['status'], where: { seller_id: id }, _count: { _all: true } }),
+      this.db.order.count({ where: { seller_id: id } }),
+      this.db.order.aggregate({ _sum: { final_total_price: true }, where: { seller_id: id, status: OrderStatus.COMPLETED } }),
+      this.db.order.groupBy({ by: ['status'], where: { seller_id: id }, _count: { _all: true } }),
+      this.db.product.findMany({
+        where: { seller_id: id },
+        orderBy: { created_at: 'desc' },
+        take: 5,
+        select: { id: true, name: true, reference_price: true, stock_quantity: true, unit: true, status: true, created_at: true },
+      }),
+      this.db.order.findMany({
+        where: { seller_id: id },
+        orderBy: { created_at: 'desc' },
+        take: 5,
+        select: {
+          id: true,
+          status: true,
+          final_total_price: true,
+          created_at: true,
+          buyer: { select: { id: true, full_name: true } },
+        },
+      }),
+    ]);
+
+    return {
+      user,
+      buyerSummary: {
+        totalOrders: buyerTotalOrders,
+        totalSpent: Number(buyerSpentAgg._sum.final_total_price ?? 0),
+        ordersByStatus: orderMap(buyerGrouped),
+        recentOrders,
+        reviewsWrittenCount,
+      },
+      sellerSummary: {
+        totalProducts: sellerTotalProducts,
+        productsByStatus: productMap(productGrouped),
+        totalSoldOrders: sellerTotalOrders,
+        totalRevenue: Number(sellerRevenueAgg._sum.final_total_price ?? 0),
+        ordersByStatus: orderMap(sellerOrderGrouped),
+        recentProducts,
+        recentSales,
+      },
+    };
+  }
 }

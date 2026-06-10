@@ -29,6 +29,11 @@ export class AdminController {
     return this.admin.listUsers({ page, limit, search });
   }
 
+  @Get('users/:id/details')
+  userDetails(@Param('id') id: string) {
+    return this.admin.userDetails(id);
+  }
+
   @Patch('users/:id/status')
   setUserStatus(@Param('id') id: string, @Body() dto: SetUserStatusDto) {
     return this.admin.setUserStatus(id, dto.is_active);
