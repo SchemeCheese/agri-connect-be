@@ -804,6 +804,8 @@ export class ProductsService {
         description: seller.profile?.description ?? '',
         store_description: seller.profile?.description ?? '',
         isVerified: seller.profile?.is_verified ?? false,
+        // Public: mức tin cậy shop (KHÔNG expose số report/dispute thô). Mobile hiện badge khi WARNING.
+        trust_status: seller.profile?.trust_status ?? 'NORMAL',
         rating: avgRating,
         reviewCount: reviews.length,
         totalSold,

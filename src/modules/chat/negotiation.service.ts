@@ -308,6 +308,20 @@ export class NegotiationService {
       throw new BadRequestException(QUOTE_EXPIRED_MESSAGE);
     }
 
+    // P0_24 — không cho chốt báo giá khi sản phẩm đã hết hàng / không đủ tồn kho.
+    if (action === 'ACCEPTED') {
+      const qty = Number(msg.quote_quantity ?? 0);
+      if (msg.quote_product_id && qty > 0) {
+        const product = await this.db.product.findUnique({
+          where: { id: msg.quote_product_id },
+          select: { stock_quantity: true, is_active: true },
+        });
+        if (!product || !product.is_active || Number(product.stock_quantity) < qty) {
+          throw new BadRequestException('Sản phẩm đã hết hàng, không thể chốt báo giá');
+        }
+      }
+    }
+
     const updated = await this.db.chatMessage.update({
       where: { id: messageId },
       data: {

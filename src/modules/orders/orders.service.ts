@@ -140,10 +140,16 @@ export class OrdersService {
 
         const product = await this.databaseService.product.findUnique({
             where: { id: productId },
-            select: { id: true, is_active: true, seller_id: true, name: true, unit: true },
+            select: { id: true, is_active: true, seller_id: true, name: true, unit: true, stock_quantity: true },
         });
         if (!product || !product.is_active) {
             throw new NotFoundException('Sản phẩm trong báo giá không còn khả dụng.');
+        }
+
+        // P0_24 — chốt báo giá phải còn đủ hàng. Chặn accept khi tồn kho < số lượng
+        // báo giá (tránh tạo đơn cho sản phẩm đã hết hàng).
+        if (Number(product.stock_quantity) < quantity) {
+            throw new BadRequestException('Sản phẩm đã hết hàng, không thể chốt báo giá');
         }
 
         const totalAmount = Math.round(quantity * negotiatedPrice);

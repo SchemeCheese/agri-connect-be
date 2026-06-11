@@ -208,6 +208,8 @@ export class ShopsService {
       avatar_url: avatar?.url ?? null,
       banner_url: seller.profile?.cover_url ?? null,
       banners,
+      // Public: mức tin cậy shop (KHÔNG expose số report/dispute thô). FE hiện badge khi WARNING.
+      trust_status: seller.profile?.trust_status ?? 'NORMAL',
       shop_location_name: seller.profile?.shop_location_name ?? null,
       shop_google_maps_url: seller.profile?.shop_google_maps_url ?? null,
       shop_latitude: shopLat,
