@@ -180,6 +180,19 @@ export class DisputeService {
     const order = dispute.order;
     const reason = dto.admin_notes?.trim() || 'Admin phán quyết hoàn tiền cho người mua.';
 
+    // COD refund = KHÔNG gọi API MoMo, chỉ đổi trạng thái (RETURNED) + hoàn kho.
+    // Đánh dấu rõ trong admin_notes để phân biệt với hoàn tiền online thật.
+    const isCodRefund = isRefundAction && !hasOnlinePaid;
+    const COD_SIM_MARKER = '[COD refund/return simulated]';
+    const resolvedAdminNotes = isCodRefund
+      ? `${dto.admin_notes?.trim() ? dto.admin_notes.trim() + ' ' : ''}${COD_SIM_MARKER}`
+      : (dto.admin_notes ?? null);
+    if (isCodRefund) {
+      this.logger.log(
+        `[adjudicate] COD refund/return simulated cho đơn ${dispute.order_id} — KHÔNG gọi MoMo, đổi RETURNED + hoàn kho.`,
+      );
+    }
+
     // B1: ghi nhận phán quyết + đổi trạng thái đơn (+ đánh dấu REFUNDING nếu refund
     //     online) — tất cả trong 1 $transaction.
     await this.db.$transaction(async (tx) => {
@@ -188,7 +201,7 @@ export class DisputeService {
         data: {
           outcome: dto.outcome,
           action_taken: dto.action_taken,
-          admin_notes: dto.admin_notes ?? null,
+          admin_notes: resolvedAdminNotes,
           status: finalStatus,
           resolved_at: new Date(),
         },
