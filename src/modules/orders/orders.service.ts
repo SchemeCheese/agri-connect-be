@@ -277,6 +277,30 @@ export class OrdersService {
 
         const productMap = new Map(dbProducts.map((p) => [p.id, p]));
 
+        // ── Suy ra seller từ QUAN HỆ SẢN PHẨM, KHÔNG tin seller_id của client ──────
+        // FE có thể gửi seller_id rỗng/'unknown'/sai (vd: thêm vào giỏ từ trang shop
+        // mà thiếu quan hệ seller). Backend là nguồn quyền lực: với mỗi nhóm đơn, lấy
+        // seller_id thật từ product rồi GHI ĐÈ. Một nhóm trộn nhiều seller là dữ liệu
+        // hỏng → chặn rõ ràng thay vì tạo đơn sai.
+        for (const sellerOrder of dto.seller_orders) {
+            const derived = new Set(
+                sellerOrder.items
+                    .map((i) => productMap.get(i.product_id)?.seller_id)
+                    .filter((id): id is string => Boolean(id)),
+            );
+            if (derived.size === 0) {
+                throw new BadRequestException(
+                    'Không xác định được người bán cho sản phẩm trong giỏ hàng.',
+                );
+            }
+            if (derived.size > 1) {
+                throw new BadRequestException(
+                    'Một nhóm đơn chứa sản phẩm từ nhiều người bán khác nhau.',
+                );
+            }
+            sellerOrder.seller_id = [...derived][0];
+        }
+
         // Gom tổng số lượng yêu cầu theo product_id — cùng 1 sản phẩm có thể xuất hiện
         // nhiều dòng (giỏ tách dòng); phải cộng dồn rồi mới so với tồn kho.
         const requestedQtyByProduct = new Map<string, number>();

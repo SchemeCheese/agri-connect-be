@@ -197,6 +197,15 @@ export class ShopsService {
       seller.profile?.shop_longitude != null ? Number(seller.profile.shop_longitude) : null;
     const banners = (seller.profile?.banners1 ?? []).slice(0, 3);
 
+    // Shop identity dùng để gắn vào từng sản phẩm — giúp giỏ hàng (FE/mobile) luôn
+    // có seller_id + tên shop ngay khi Add to Cart từ trang shop, tránh "Shop #".
+    const storeName = seller.profile?.store_name || seller.full_name;
+    const shopIdentity = {
+      id: seller.id,
+      store_name: storeName,
+      avatar_url: avatar?.url ?? null,
+    };
+
     return {
       id: seller.id,
       store_name: seller.profile?.store_name || seller.full_name,
@@ -230,6 +239,10 @@ export class ShopsService {
         images: imageMap[p.id] ?? [],
         category: p.category.name,
         stock: Number(p.stock_quantity),
+        unit: p.unit,
+        // Quan hệ seller được nhúng sẵn để giỏ hàng group đúng shop.
+        seller_id: seller.id,
+        shop: shopIdentity,
       })),
     };
   }

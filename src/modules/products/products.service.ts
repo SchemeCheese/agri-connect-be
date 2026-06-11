@@ -827,7 +827,16 @@ export class ProductsService {
         origin: p.location || 'Việt Nam',
         images: imageMap[p.id] ?? [],
         stock: Number(p.stock_quantity),
+        unit: p.unit,
         rating: avgRating,
+        // Nhúng quan hệ seller/shop để giỏ hàng (mobile) group đúng + hiện tên shop,
+        // tránh "unknown"/"Gian hàng chưa cập nhật" khi Add to Cart từ trang shop.
+        seller_id: seller.id,
+        shop: {
+          id: seller.id,
+          store_name: seller.profile?.store_name || seller.full_name,
+          avatar_url: avatarAttachment?.url ?? null,
+        },
       })),
     };
   }
