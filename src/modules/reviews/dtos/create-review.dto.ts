@@ -20,6 +20,13 @@ export class CreateReviewDto {
   @IsString({ each: true })
   image_urls?: string[];
 
+  // Alias: web gửi `images`, mobile/khác có thể gửi `image_urls`. Whitelist để
+  // forbidNonWhitelisted KHÔNG reject; service merge `image_urls ?? images`.
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  images?: string[];
+
   // FE có thể gửi kèm product_id — whitelist để không bị reject
   @IsOptional()
   @IsString()

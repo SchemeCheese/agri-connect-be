@@ -72,10 +72,12 @@ export class ReviewsService {
         },
       });
 
-      // Lưu ảnh review (FE upload trước → gửi URL vào image_urls[])
-      if (dto.image_urls && dto.image_urls.length > 0) {
+      // Lưu ảnh review (FE upload trước → gửi URL). Web gửi `images`, các client
+      // khác gửi `image_urls` — nhận cả hai.
+      const reviewImageUrls = dto.image_urls ?? dto.images ?? [];
+      if (reviewImageUrls.length > 0) {
         await tx.attachment.createMany({
-          data: dto.image_urls.map((url) => ({
+          data: reviewImageUrls.map((url) => ({
             url,
             file_type: 'image',
             target_id: created.id,
