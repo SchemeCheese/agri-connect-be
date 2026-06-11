@@ -3,6 +3,7 @@ import { JwtModule } from '@nestjs/jwt';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { AIAssistantGateway } from './ai-assistant.gateway';
 import { AIAssistantController } from './ai-assistant.controller';
+import { SellerAiController } from './seller-ai.controller';
 import { AIAssistantService } from './services/ai-assistant.service';
 import { IntentClassifierService } from './services/intent-classifier.service';
 import { SessionService } from './services/session.service';
@@ -34,7 +35,7 @@ import { ToolExecutorService } from './tools/tool-executor.service';
       inject: [ConfigService],
     }),
   ],
-  controllers: [AIAssistantController],
+  controllers: [AIAssistantController, SellerAiController],
   providers: [
     // Cả 2 provider đăng ký standalone — AIAssistantService inject trực tiếp
     // để orchestrate fallback Gemini → Groq khi rate limit / 5xx.

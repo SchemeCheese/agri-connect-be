@@ -116,6 +116,28 @@ const EMPTY_SUGGESTION: ProductSuggestion = {
   confidence: null,
 };
 
+/** Đơn vị hợp lệ cho gợi ý Magic Fill (seller) — Gemini phải chọn trong danh sách này. */
+export const SELLER_SUGGEST_UNITS = ['kg', 'bó', 'túi', 'thùng', 'quả', 'gói', 'bao'] as const;
+
+/** Gợi ý sản phẩm đầy đủ cho seller (Magic Fill) — đã validate categoryId/unit/price. */
+export interface SellerProductSuggestion {
+  name: string;
+  description: string;
+  suggestedPrice: number | null;
+  unit: string;
+  categoryId: string | null;
+  confidence: number;
+}
+
+const EMPTY_SELLER_SUGGESTION: SellerProductSuggestion = {
+  name: '',
+  description: '',
+  suggestedPrice: null,
+  unit: '',
+  categoryId: null,
+  confidence: 0,
+};
+
 // Sự kiện trạng thái gửi giữa các token để FE hiển thị "Đang ..." labels.
 // Gateway phân biệt: nếu chunk có shape ToolStatusEvent → emit ai:tool_start, else ai:token.
 export interface ToolStatusEvent {
@@ -441,6 +463,87 @@ export class AIAssistantService {
       description: str(obj.description),
       confidence,
     };
+  }
+
+  // ─── Magic Fill cho SELLER: gợi ý đầy đủ name/description/price/unit/categoryId ──
+  // Khác suggestProductFromImage (legacy, trả category_name): bản này INJECT danh
+  // mục thật vào prompt để Gemini chọn categoryId hợp lệ + ước lượng giá VND.
+  // KHÔNG lưu DB — chỉ trả gợi ý cho seller review.
+  async suggestProductForSeller(base64: string, mime: string): Promise<SellerProductSuggestion> {
+    const imageBase64 = base64.replace(/^data:[^;]+;base64,/, '');
+
+    // Moderation TRƯỚC Gemini (chặn NSFW / không phải nông sản, tiết kiệm token).
+    const moderation = await this.visionModeration.moderateImage(imageBase64);
+    if (!moderation.isSafe) throw new BadRequestException(UNSAFE_IMAGE_RESPONSE);
+    if (!moderation.isAgriculture) throw new BadRequestException(NON_AGRI_IMAGE_RESPONSE);
+
+    if (!this.gemini.completeWithImage) return { ...EMPTY_SELLER_SUGGESTION };
+
+    // Inject danh mục thật → Gemini chỉ được chọn categoryId trong danh sách này.
+    const categories = await this.db.category.findMany({
+      select: { id: true, name: true },
+      orderBy: { id: 'asc' },
+    });
+    const validIds = new Set(categories.map((c) => String(c.id)));
+    const categoryList = categories.map((c) => `${c.id}=${c.name}`).join(', ');
+
+    const prompt =
+      'You are an agricultural expert in Vietnam. Analyze this image. ' +
+      'Return ONLY a valid JSON object with the following schema: ' +
+      '{ "name": "Short Vietnamese product name", ' +
+      '"description": "Short sales description in Vietnamese", ' +
+      '"suggestedPrice": integer (estimated retail price in VND), ' +
+      `"unit": string (choose strictly from: ${SELLER_SUGGEST_UNITS.map((u) => `'${u}'`).join(', ')}), ` +
+      `"categoryId": string (choose the best matching ID from this list: ${categoryList}), ` +
+      '"confidence": float (0.0 to 1.0) }. ' +
+      'All string values must be in Vietnamese. ' +
+      'If the image is NOT an agricultural product, set confidence below 0.3.';
+
+    try {
+      const result = await this.gemini.completeWithImage({
+        model: VISION_MODEL,
+        systemInstruction: prompt,
+        imageBase64,
+        mimeType: mime,
+        jsonOutput: true,
+        maxTokens: 2048,
+        temperature: 0.2,
+      });
+      return this.normalizeSellerSuggestion(JSON.parse(result.content), validIds);
+    } catch (err) {
+      // Gemini hallucinate JSON / lỗi mạng → trả rỗng, FE fallback nhập tay (vẫn 200).
+      this.logger.warn(`suggestProductForSeller failed: ${(err as Error).message}`);
+      return { ...EMPTY_SELLER_SUGGESTION };
+    }
+  }
+
+  /** Coerce + validate output của Gemini về SellerProductSuggestion (chống hallucination). */
+  private normalizeSellerSuggestion(raw: unknown, validIds: Set<string>): SellerProductSuggestion {
+    if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+      return { ...EMPTY_SELLER_SUGGESTION };
+    }
+    const obj = raw as Record<string, unknown>;
+    const str = (v: unknown): string => (typeof v === 'string' && v.trim() ? v.trim() : '');
+
+    let confidence = 0;
+    if (typeof obj.confidence === 'number' && Number.isFinite(obj.confidence)) {
+      confidence = Math.min(1, Math.max(0, obj.confidence));
+    }
+
+    let suggestedPrice: number | null = null;
+    const priceRaw = typeof obj.suggestedPrice === 'string' ? Number(obj.suggestedPrice) : obj.suggestedPrice;
+    if (typeof priceRaw === 'number' && Number.isFinite(priceRaw) && priceRaw > 0) {
+      suggestedPrice = Math.round(priceRaw);
+    }
+
+    const unitStr = str(obj.unit);
+    const unit = (SELLER_SUGGEST_UNITS as readonly string[]).includes(unitStr) ? unitStr : '';
+
+    // categoryId chỉ nhận khi khớp ID có thật trong DB — chặn Gemini bịa id.
+    const categoryId =
+      obj.categoryId != null && validIds.has(String(obj.categoryId)) ? String(obj.categoryId) : null;
+
+    return { name: str(obj.name), description: str(obj.description), suggestedPrice, unit, categoryId, confidence };
   }
 
   /**
