@@ -8,7 +8,7 @@ export class SearchService {
 
   async search(q: string) {
     if (!q || q.trim().length === 0) {
-      return { shops: [], products: [] };
+      return { shops: [], products: [], categories: [] };
     }
 
     const keyword = q.trim();
@@ -127,6 +127,31 @@ export class SearchService {
       },
     }));
 
-    return { shops, products };
+    // ─── 3. Tìm kiếm Danh mục theo tên (kèm số sản phẩm đang bán) ────────────
+    // Cho phép "hữu cơ", "rau củ"... trả về danh mục, không chỉ shop/sản phẩm.
+    const matchedCategories = await this.db.category.findMany({
+      where: { name: { contains: keyword, mode: 'insensitive' } },
+      select: { id: true, name: true },
+      take: 10,
+    });
+    const categoryCounts =
+      matchedCategories.length > 0
+        ? await this.db.product.groupBy({
+            by: ['category_id'],
+            where: { category_id: { in: matchedCategories.map((c) => c.id) }, is_active: true },
+            _count: { id: true },
+          })
+        : [];
+    const catCountMap = (categoryCounts as { category_id: number; _count: { id: number } }[]).reduce(
+      (acc, c) => ({ ...acc, [c.category_id]: c._count.id }),
+      {} as Record<number, number>,
+    );
+    const categories = matchedCategories.map((c) => ({
+      id: c.id,
+      name: c.name,
+      product_count: catCountMap[c.id] ?? 0,
+    }));
+
+    return { shops, products, categories };
   }
 }

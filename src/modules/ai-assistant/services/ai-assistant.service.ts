@@ -57,7 +57,12 @@ const SUGGEST_PRODUCT_PROMPT =
   'All string values must be in Vietnamese. "confidence" is a number between 0 and 1. ' +
   'If the image does not show an agricultural product, return all string fields as null and confidence 0.';
 
-const COMPLEX_INTENTS: IntentLabel[] = ['PRICE_ANALYSIS', 'NEGOTIATION_SUPPORT'];
+const COMPLEX_INTENTS: IntentLabel[] = [
+  'PRICE_ANALYSIS',
+  'NEGOTIATION_SUPPORT',
+  'SELLER_ANALYTICS',
+  'ADMIN_ANALYTICS',
+];
 
 // Intents that must use tool calling to retrieve live data or knowledge-base content.
 // PLATFORM_GUIDE + FAQ go through get_platform_policy so the LLM cannot hallucinate UI steps.
@@ -66,6 +71,8 @@ const TOOL_REQUIRED_INTENTS: IntentLabel[] = [
   'PRICE_ANALYSIS',
   'NEGOTIATION_SUPPORT',
   'SELLER_RECOMMENDATION',
+  'SELLER_ANALYTICS',
+  'ADMIN_ANALYTICS',
   'PLATFORM_GUIDE',
   'FAQ',
 ];
@@ -73,7 +80,15 @@ const TOOL_REQUIRED_INTENTS: IntentLabel[] = [
 // Knowledge-base tools — their results are authoritative prose, not entity rows.
 // Grounding for these is "stay faithful to tool content", not "whitelist names".
 // Names here MUST match the wire name in tool-registry.ts (function.name).
-const KNOWLEDGE_TOOLS = new Set<string>(['get_platform_policy']);
+// KNOWLEDGE_TOOLS: kết quả là "nguồn sự thật" dạng dữ liệu/prose, KHÔNG phải hàng
+// entity để whitelist tên. get_seller_analytics trả số liệu DB của chính seller →
+// xếp vào đây để grounding bám sát tool result (không bị nhầm "không tìm thấy") và
+// output-validator bỏ qua entity-whitelist (giá > 100 tỷ vẫn bị chặn như thường).
+const KNOWLEDGE_TOOLS = new Set<string>([
+  'get_platform_policy',
+  'get_seller_analytics',
+  'get_admin_overview',
+]);
 
 // Cap tool rounds for knowledge-only intents — one lookup is always enough,
 // extra rounds just burn 300-800ms of FAST_MODEL latency per request.
@@ -384,7 +399,11 @@ export class AIAssistantService {
     );
 
     // ── 8. Return streaming generator ────────────────────────────────────────
-    const toolCtx: ToolExecutionContext = { userId, sessionId: session.id };
+    const toolCtx: ToolExecutionContext = {
+      userId,
+      sessionId: session.id,
+      isAdmin: userContext.userRole === 'ADMIN',
+    };
     const stream = useTools
       ? this.streamWithToolLoop(session.id, messages, model, intent, toolCtx)
       : this.streamAndSave(session.id, messages, model, intent);
@@ -677,13 +696,17 @@ export class AIAssistantService {
 
     const groundingContent = hadKnowledgeTool
       ? `[GROUNDING — KNOWLEDGE BASE]
-Câu trả lời PHẢI bám sát nội dung do get_platform_policy trả về.
+Câu trả lời PHẢI bám sát CHÍNH XÁC nội dung/số liệu do công cụ tra cứu trả về (chính sách sàn HOẶC số liệu phân tích người bán).
 TUYỆT ĐỐI KHÔNG:
 - Thêm bước thao tác KHÔNG có trong tool result
 - Bịa URL, mã giảm giá, hoa hồng, biểu phí mà tool không nhắc tới
+- BỊA doanh thu, số đơn, số lượng bán, tỷ lệ chuyển đổi — chỉ dùng đúng con số tool trả về
 - Diễn giải sai trạng thái đơn hàng (PENDING/CONFIRMED/SHIPPING/COMPLETED)
 
-Hãy trình bày các bước dưới dạng danh sách rõ ràng, tiếng Việt, ngắn gọn.`
+Nếu tool trả về rỗng hoặc "hasData": false (chưa có dữ liệu): trả lời đúng câu
+"Hiện chưa đủ dữ liệu để đưa ra kết luận." rồi gợi ý người bán đăng/bán thêm để có số liệu.
+Với phân tích người bán: trình bày best-seller và sản phẩm cần cải thiện kèm LÝ DO + con số
+cụ thể tool đưa ra (vd "1.200 lượt xem nhưng 12 đơn — chuyển đổi 1%"), tiếng Việt, ngắn gọn.`
       : validEntities.size > 0
         ? `[GROUNDING — STRICT]
 Chỉ được nhắc đến các tên sau trong câu trả lời (chính xác đến từng ký tự):
@@ -790,7 +813,11 @@ VẪN TUYỆT ĐỐI CẤM (anti-hallucination):
     if (!res?.success || !Array.isArray(res.data) || res.data.length === 0) return null;
 
     try {
-      if (toolName === 'search_products') {
+      if (
+        toolName === 'search_products' ||
+        toolName === 'get_similar_products' ||
+        toolName === 'get_discounted_products'
+      ) {
         const products = (res.data as ProductSummary[]).filter((p) => p?.id).slice(0, 6);
         if (products.length === 0) return null;
 
@@ -984,7 +1011,7 @@ VẪN TUYỆT ĐỐI CẤM (anti-hallucination):
     currentProductId?: string,
   ): Promise<SystemPromptContext> {
     const [user, behaviors, recentOrders] = await Promise.all([
-      this.db.user.findUnique({ where: { id: userId }, select: { full_name: true } }),
+      this.db.user.findUnique({ where: { id: userId }, select: { full_name: true, is_admin: true } }),
       this.db.userBehavior.findMany({
         where: { user_id: userId },
         orderBy: { created_at: 'desc' },
@@ -1043,7 +1070,9 @@ VẪN TUYỆT ĐỐI CẤM (anti-hallucination):
 
     return {
       userName: user?.full_name ?? 'Khách',
-      userRole: mode === AIMode.BUYER ? 'BUYER' : 'SELLER',
+      // ADMIN nhận diện qua DB (is_admin), không phụ thuộc mode FE gửi → không cần
+      // thêm enum AIMode.ADMIN (tránh migration). Session.mode vẫn lưu BUYER/SELLER.
+      userRole: user?.is_admin ? 'ADMIN' : mode === AIMode.BUYER ? 'BUYER' : 'SELLER',
       currentProductName,
       recentViewedProducts,
       purchaseCategories,

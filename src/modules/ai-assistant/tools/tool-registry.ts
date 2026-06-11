@@ -170,6 +170,82 @@ export const AGRI_TOOLS: ToolDefinition[] = [
   {
     type: 'function',
     function: {
+      name: 'get_similar_products',
+      description:
+        'Tìm sản phẩm TƯƠNG TỰ một sản phẩm cho trước (cùng danh mục, giá gần nhau, còn bán & còn hàng). ' +
+        'Dùng khi buyer hỏi "có sản phẩm nào tương tự X không", "loại giống X".',
+      parameters: {
+        type: 'object',
+        properties: {
+          product_id: { type: 'string', description: 'ID sản phẩm gốc cần tìm sản phẩm tương tự' },
+          limit: { type: 'integer', description: 'Số sản phẩm tối đa (1-10, mặc định 6)', minimum: 1, maximum: 10 },
+        },
+        required: ['product_id'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_discounted_products',
+      description:
+        'Tìm sản phẩm ĐANG GIẢM GIÁ — tức sản phẩm thuộc shop CÓ voucher/khuyến mãi đang hiệu lực. ' +
+        'Dùng khi buyer hỏi "sản phẩm đang giảm giá", "có khuyến mãi gì không".',
+      parameters: {
+        type: 'object',
+        properties: {
+          category: { type: 'string', description: 'Lọc theo danh mục (tùy chọn)' },
+          limit: { type: 'integer', description: 'Số sản phẩm tối đa (1-10, mặc định 6)', minimum: 1, maximum: 10 },
+        },
+        required: [],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_admin_overview',
+      description:
+        'Tổng quan TOÀN SÀN cho QUẢN TRỊ VIÊN (real data): doanh thu toàn sàn (hôm nay/tháng/tổng), ' +
+        'top seller theo doanh thu, số khiếu nại (dispute) trong tháng, shop bị cảnh báo (WARNING), ' +
+        'người dùng bị khóa. CHỈ dùng khi admin hỏi về tình hình toàn hệ thống. Không nhận tham số nhạy cảm.',
+      parameters: {
+        type: 'object',
+        properties: {
+          limit: { type: 'integer', description: 'Số dòng tối đa mỗi danh sách (1-10, mặc định 5)', minimum: 1, maximum: 10 },
+        },
+        required: [],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_seller_analytics',
+      description:
+        'Lấy SỐ LIỆU PHÂN TÍCH KINH DOANH của chính người bán đang đăng nhập (real data từ DB): ' +
+        'sản phẩm bán chạy nhất (điểm 50% sản lượng + 30% doanh thu + 20% số đơn), sản phẩm cần cải thiện ' +
+        '(view cao chuyển đổi thấp, rating thấp, có khiếu nại, tồn lâu), doanh thu hôm nay/tháng/tổng, ' +
+        'tỷ lệ chuyển đổi, top khách hàng. CHỈ dùng khi SELLER hỏi về tình hình kinh doanh của CHÍNH HỌ ' +
+        '(ví dụ: "sản phẩm bán chạy nhất của tôi", "doanh thu hôm nay", "sản phẩm nào cần cải thiện", ' +
+        '"top khách hàng", "tỷ lệ chuyển đổi", "hàng tồn lâu nhất"). Không nhận tham số shop — luôn dùng shop của người hỏi.',
+      parameters: {
+        type: 'object',
+        properties: {
+          limit: {
+            type: 'integer',
+            description: 'Số dòng tối đa cho mỗi bảng xếp hạng (1-10, mặc định 5)',
+            minimum: 1,
+            maximum: 10,
+          },
+        },
+        required: [],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'get_platform_policy',
       description:
         'Tra cứu quy trình và chính sách chính thức của sàn Agri-Connect: ' +

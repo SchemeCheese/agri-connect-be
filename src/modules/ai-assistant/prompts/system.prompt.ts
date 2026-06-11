@@ -1,6 +1,6 @@
 export interface SystemPromptContext {
   userName: string;
-  userRole: 'BUYER' | 'SELLER';
+  userRole: 'BUYER' | 'SELLER' | 'ADMIN';
   currentProductName?: string;
   recentViewedProducts?: string[];
   purchaseCategories?: string[];
@@ -94,14 +94,18 @@ KHÔNG bù bằng câu trả lời chung chung kiểu "thường thì...", "có 
 
 export function buildSystemPrompt(ctx: SystemPromptContext): string {
   const roleInstructions =
-    ctx.userRole === 'SELLER' ? buildSellerContext(ctx) : buildBuyerContext(ctx);
+    ctx.userRole === 'ADMIN'
+      ? buildAdminContext(ctx)
+      : ctx.userRole === 'SELLER'
+        ? buildSellerContext(ctx)
+        : buildBuyerContext(ctx);
 
   return `# Agri-Assistant — Trợ lý AI của sàn nông sản Agri-Connect
 
 ${SECURITY_PREAMBLE}
 ## VAI TRÒ
 Bạn là trợ lý AI chuyên biệt cho sàn giao dịch nông sản Agri-Connect.
-Người dùng: **${ctx.userName}** (${ctx.userRole === 'BUYER' ? 'Người mua' : 'Người bán'})
+Người dùng: **${ctx.userName}** (${ctx.userRole === 'BUYER' ? 'Người mua' : ctx.userRole === 'SELLER' ? 'Người bán' : 'Quản trị viên'})
 
 ## PHẠM VI HỖ TRỢ
 1. Tìm kiếm sản phẩm nông sản trên sàn
@@ -148,4 +152,20 @@ function buildSellerContext(ctx: SystemPromptContext): string {
 - Cảnh báo: thông báo khi có cơ hội hoặc rủi ro về giá/nhu cầu`);
 
   return lines.join('\n');
+}
+
+function buildAdminContext(_ctx: SystemPromptContext): string {
+  return `
+## CONTEXT ADMIN (QUẢN TRỊ TOÀN SÀN)
+Bạn đang hỗ trợ QUẢN TRỊ VIÊN. Khi admin hỏi về tình hình toàn hệ thống
+(doanh thu toàn sàn, top seller, số dispute trong tháng, shop bị cảnh báo
+trust_status=WARNING, user bị khóa), GỌI tool get_admin_overview rồi tóm tắt
+theo ĐÚNG số liệu tool trả về.
+
+## GỢI Ý CHO ADMIN
+- Báo cáo doanh thu/đơn toàn sàn, xếp hạng top seller theo doanh thu.
+- Nêu số khiếu nại (dispute) trong tháng và phân bố trạng thái.
+- Liệt kê shop đang bị cảnh báo và user bị khóa (từ dữ liệu thật).
+- Nếu tool trả rỗng/không đủ dữ liệu: nói "Hiện chưa đủ dữ liệu để đưa ra kết luận."
+- TUYỆT ĐỐI không bịa số liệu; chỉ dùng con số get_admin_overview trả về.`;
 }

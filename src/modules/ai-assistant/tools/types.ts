@@ -4,7 +4,11 @@ export type ToolName =
   | 'analyze_price_trends'
   | 'recommend_sellers'
   | 'get_negotiation_guidance'
-  | 'get_platform_policy';
+  | 'get_platform_policy'
+  | 'get_seller_analytics'
+  | 'get_similar_products'
+  | 'get_discounted_products'
+  | 'get_admin_overview';
 
 export const TOOL_WHITELIST: ReadonlySet<ToolName> = new Set<ToolName>([
   'search_products',
@@ -13,6 +17,10 @@ export const TOOL_WHITELIST: ReadonlySet<ToolName> = new Set<ToolName>([
   'recommend_sellers',
   'get_negotiation_guidance',
   'get_platform_policy',
+  'get_seller_analytics',
+  'get_similar_products',
+  'get_discounted_products',
+  'get_admin_overview',
 ]);
 
 export interface ToolResult<T = unknown> {
@@ -25,6 +33,8 @@ export interface ToolResult<T = unknown> {
 export interface ToolExecutionContext {
   userId: string;
   sessionId: string;
+  /** true nếu user là admin (lấy từ DB, không tin client) — gate tool toàn sàn. */
+  isAdmin?: boolean;
 }
 
 export const MAX_TOOL_ROUNDS = 3;

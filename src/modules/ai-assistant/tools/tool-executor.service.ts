@@ -13,6 +13,10 @@ import { PriceAnalysisTool } from './price-analysis.tool';
 import { NegotiationGuideTool } from './negotiation-guide.tool';
 import { SellerRecommendationTool } from './seller-recommendation.tool';
 import { PlatformFaqTool } from './platform-faq.tool';
+import { SellerAnalyticsTool } from './seller-analytics.tool';
+import { SimilarProductsTool } from './similar-products.tool';
+import { DiscountedProductsTool } from './discounted-products.tool';
+import { AdminOverviewTool } from './admin-overview.tool';
 
 interface CacheEntry {
   result: ToolResult;
@@ -33,6 +37,10 @@ const CACHE_TTL_MS: Record<ToolName, number> = {
   recommend_sellers: 10 * 60_000,
   get_negotiation_guidance: 3 * 60_000,
   get_platform_policy: 60 * 60_000, // 1 hour — static content
+  get_seller_analytics: 3 * 60_000, // seller's own data — refresh fairly often
+  get_similar_products: 5 * 60_000,
+  get_discounted_products: 5 * 60_000,
+  get_admin_overview: 3 * 60_000,
 };
 
 @Injectable()
@@ -46,6 +54,10 @@ export class ToolExecutorService {
     private readonly negotiationGuide: NegotiationGuideTool,
     private readonly sellerRecommendation: SellerRecommendationTool,
     private readonly platformFaq: PlatformFaqTool,
+    private readonly sellerAnalytics: SellerAnalyticsTool,
+    private readonly similarProducts: SimilarProductsTool,
+    private readonly discountedProducts: DiscountedProductsTool,
+    private readonly adminOverview: AdminOverviewTool,
   ) {
     // Evict stale entries every 15 minutes
     setInterval(() => this.evictStaleCache(), 15 * 60_000);
@@ -125,7 +137,7 @@ export class ToolExecutorService {
   private async dispatch(
     toolName: ToolName,
     args: Record<string, unknown>,
-    _ctx: ToolExecutionContext,
+    ctx: ToolExecutionContext,
   ): Promise<ToolResult> {
     // Cast via unknown: args come from JSON.parse so shape is validated by the LLM/schema,
     // not by TypeScript. Each tool should gracefully handle missing/wrong fields.
@@ -157,6 +169,26 @@ export class ToolExecutorService {
       case 'get_platform_policy':
         return this.platformFaq.getPlatformPolicy(
           a as Parameters<PlatformFaqTool['getPlatformPolicy']>[0],
+        );
+
+      case 'get_seller_analytics':
+        // sellerId LẤY TỪ ctx.userId (người đăng nhập) — KHÔNG từ tham số LLM.
+        return this.sellerAnalytics.run(
+          a as Parameters<SellerAnalyticsTool['run']>[0],
+          ctx.userId,
+        );
+
+      case 'get_similar_products':
+        return this.similarProducts.run(a as Parameters<SimilarProductsTool['run']>[0]);
+
+      case 'get_discounted_products':
+        return this.discountedProducts.run(a as Parameters<DiscountedProductsTool['run']>[0]);
+
+      case 'get_admin_overview':
+        // isAdmin LẤY TỪ ctx (DB), KHÔNG từ LLM — chặn lộ dữ liệu toàn sàn.
+        return this.adminOverview.run(
+          a as Parameters<AdminOverviewTool['run']>[0],
+          ctx.isAdmin === true,
         );
 
       default:

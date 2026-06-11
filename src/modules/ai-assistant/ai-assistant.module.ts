@@ -11,6 +11,7 @@ import { RateLimitService } from './services/rate-limit.service';
 import { VisionModerationService } from './services/vision-moderation.service';
 import { EmbeddingService } from './services/embedding.service';
 import { SemanticSearchService } from './services/semantic-search.service';
+import { SellerAnalyticsService } from './services/seller-analytics.service';
 import { GeminiProvider } from './providers/gemini.provider';
 import { GroqProvider } from './providers/groq.provider';
 import { InputSanitizer } from './security/input-sanitizer';
@@ -22,6 +23,10 @@ import { PriceAnalysisTool } from './tools/price-analysis.tool';
 import { NegotiationGuideTool } from './tools/negotiation-guide.tool';
 import { SellerRecommendationTool } from './tools/seller-recommendation.tool';
 import { PlatformFaqTool } from './tools/platform-faq.tool';
+import { SellerAnalyticsTool } from './tools/seller-analytics.tool';
+import { SimilarProductsTool } from './tools/similar-products.tool';
+import { DiscountedProductsTool } from './tools/discounted-products.tool';
+import { AdminOverviewTool } from './tools/admin-overview.tool';
 import { ToolExecutorService } from './tools/tool-executor.service';
 
 @Module({
@@ -54,6 +59,9 @@ import { ToolExecutorService } from './tools/tool-executor.service';
     SessionService,
     IntentClassifierService,
 
+    // Seller analytics engine (nguồn dữ liệu cho /seller/analytics + tool chatbot)
+    SellerAnalyticsService,
+
     // Image moderation (Google Cloud Vision) — gác cổng NSFW / non-agri trước Gemini
     VisionModerationService,
 
@@ -68,6 +76,10 @@ import { ToolExecutorService } from './tools/tool-executor.service';
     NegotiationGuideTool,
     SellerRecommendationTool,
     PlatformFaqTool,
+    SellerAnalyticsTool,
+    SimilarProductsTool,
+    DiscountedProductsTool,
+    AdminOverviewTool,
     ToolExecutorService,
 
     // Orchestrator

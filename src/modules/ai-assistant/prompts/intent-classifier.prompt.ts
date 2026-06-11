@@ -5,6 +5,8 @@ Phân loại tin nhắn người dùng vào ĐÚNG MỘT trong các nhãn sau:
 - PRICE_ANALYSIS: phân tích xu hướng giá, so sánh giá, lịch sử giá giao dịch
 - NEGOTIATION_SUPPORT: hỗ trợ thương lượng, gợi ý mức giá, chiến lược đàm phán
 - SELLER_RECOMMENDATION: gợi ý shop, seller uy tín, đánh giá seller
+- SELLER_ANALYTICS: NGƯỜI BÁN hỏi về tình hình kinh doanh của CHÍNH HỌ — sản phẩm bán chạy nhất/cần cải thiện, doanh thu (hôm nay/tháng), số đơn, tỷ lệ chuyển đổi, top khách hàng, hàng tồn lâu
+- ADMIN_ANALYTICS: QUẢN TRỊ hỏi về TOÀN SÀN — top seller toàn hệ thống, doanh thu toàn sàn, số dispute/khiếu nại trong tháng, shop bị cảnh báo (WARNING), người dùng bị khóa
 - PLATFORM_GUIDE: hướng dẫn thao tác trên sàn — đăng ký người bán, tạo shop, đăng sản phẩm, cài đặt thương lượng, rút tiền, đổi mật khẩu, upload banner/avatar, quản lý đơn hàng
 - FAQ: câu hỏi ngắn về quy trình đặt hàng, phương thức thanh toán, vận chuyển, đổi trả
 - OFF_TOPIC: KHÔNG liên quan đến giao dịch nông sản
@@ -48,6 +50,19 @@ Ví dụ:
 "Có cửa hàng nào bán dâu tây" → SELLER_RECOMMENDATION
 "Cửa hàng nào uy tín nhất" → SELLER_RECOMMENDATION
 "Gợi ý seller bán cam sành" → SELLER_RECOMMENDATION
+"Sản phẩm bán chạy nhất của tôi tháng này?" → SELLER_ANALYTICS
+"Doanh thu hôm nay của shop tôi?" → SELLER_ANALYTICS
+"Sản phẩm nào của tôi cần cải thiện?" → SELLER_ANALYTICS
+"Tỷ lệ chuyển đổi shop tôi bao nhiêu?" → SELLER_ANALYTICS
+"Hàng nào tồn kho lâu nhất?" → SELLER_ANALYTICS
+"Top khách hàng của tôi là ai?" → SELLER_ANALYTICS
+"Top seller toàn sàn?" → ADMIN_ANALYTICS
+"Doanh thu toàn sàn tháng này?" → ADMIN_ANALYTICS
+"Có bao nhiêu khiếu nại trong tháng?" → ADMIN_ANALYTICS
+"Shop nào đang bị cảnh báo?" → ADMIN_ANALYTICS
+"Những user nào bị khóa?" → ADMIN_ANALYTICS
+"Có sản phẩm nào tương tự không?" → PRODUCT_SEARCH
+"Sản phẩm nào đang giảm giá?" → PRODUCT_SEARCH
 "Tạo trang người bán như nào?" → PLATFORM_GUIDE
 "Làm sao để đăng ký bán hàng?" → PLATFORM_GUIDE
 "Hello. giúp tôi tạo shop" → PLATFORM_GUIDE
@@ -76,6 +91,8 @@ export const INTENT_LABELS = [
   'PRICE_ANALYSIS',
   'NEGOTIATION_SUPPORT',
   'SELLER_RECOMMENDATION',
+  'SELLER_ANALYTICS',
+  'ADMIN_ANALYTICS',
   'PLATFORM_GUIDE',
   'FAQ',
   'OFF_TOPIC',

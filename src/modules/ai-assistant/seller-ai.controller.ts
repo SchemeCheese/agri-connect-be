@@ -1,7 +1,9 @@
 import {
   BadRequestException,
   Controller,
+  Get,
   Post,
+  Req,
   UploadedFile,
   UseGuards,
   UseInterceptors,
@@ -13,6 +15,7 @@ import { JwtAuthGuard } from '../auth/decorators/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/decorators/guards/roles.guard';
 import { Roles, UserRole } from '../auth/decorators/roles.decorator';
 import { AIAssistantService } from './services/ai-assistant.service';
+import { SellerAnalyticsService } from './services/seller-analytics.service';
 
 // Chỉ nhận ảnh upload trực tiếp (multipart) — KHÔNG nhận URL ngoài để chống SSRF.
 const ALLOWED_MIME = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/heic', 'image/heif']);
@@ -24,7 +27,22 @@ const MAX_BYTES = 5 * 1024 * 1024; // 5 MB
 @UseGuards(JwtAuthGuard, RolesGuard)
 @Roles(UserRole.SELLER)
 export class SellerAiController {
-  constructor(private readonly ai: AIAssistantService) {}
+  constructor(
+    private readonly ai: AIAssistantService,
+    private readonly analytics: SellerAnalyticsService,
+  ) {}
+
+  /**
+   * GET /seller/analytics — Số liệu phân tích người bán (real data từ DB).
+   * Dùng cho dashboard FE và là nguồn cho tool chatbot `get_seller_analytics`.
+   * SELLER-only. Trả về best-seller (50/30/20), need-improvement (có lý do),
+   * doanh thu hôm nay/tháng/tổng, conversion, top khách hàng.
+   */
+  @ApiOperation({ summary: 'Phân tích người bán (best-seller, cần cải thiện, doanh thu, top KH)' })
+  @Get('analytics')
+  async getAnalytics(@Req() req: { user: { sub: string } }) {
+    return this.analytics.getSellerAnalytics(req.user.sub);
+  }
 
   /**
    * POST /seller/suggest-product — Magic Fill.

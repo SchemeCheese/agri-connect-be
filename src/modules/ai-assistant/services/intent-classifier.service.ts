@@ -13,6 +13,17 @@ const CLASSIFIER_MODEL = 'gemini-2.5-flash-lite';
 
 // Keyword regex fast-path — bắt ~50-60% câu hỏi mà không cần gọi LLM (tiết kiệm 500-800ms)
 const FAST_PATH_PATTERNS: Array<{ pattern: RegExp; label: IntentLabel }> = [
+  // SELLER_ANALYTICS — đặt TRƯỚC SELLER_RECOMMENDATION để "bán chạy của tôi",
+  // "doanh thu", "chuyển đổi"... không bị bắt nhầm thành gợi-ý-shop.
+  { pattern: /\bdoanh\s*(thu|số)\b/i, label: 'SELLER_ANALYTICS' },
+  { pattern: /\b(tỷ\s*lệ\s*chuyển\s*đổi|tồn\s*kho\s*lâu|cần\s*cải\s*thiện|bán\s*chạy\s*nhất)\b/i, label: 'SELLER_ANALYTICS' },
+  { pattern: /\btop\s*(khách\s*hàng|sản\s*phẩm)\b/i, label: 'SELLER_ANALYTICS' },
+
+  // ADMIN_ANALYTICS — câu hỏi toàn sàn (đặt trước để không lẫn với phân tích seller).
+  { pattern: /\b(toàn\s*sàn|toàn\s*hệ\s*thống|top\s*seller)\b/i, label: 'ADMIN_ANALYTICS' },
+  { pattern: /\b(shop|cửa\s*hàng)\b.*\b(cảnh\s*báo|warning|bị\s*hạn\s*chế)\b/i, label: 'ADMIN_ANALYTICS' },
+  { pattern: /\b(user|người\s*dùng|tài\s*khoản)\b.*\b(bị\s*khóa|khoá|khóa)\b/i, label: 'ADMIN_ANALYTICS' },
+
   // SELLER_RECOMMENDATION
   { pattern: /\b(shop|cửa\s*hàng|seller|nhà\s*bán|người\s*bán)\b.*\b(nào|gì|uy\s*tín|tốt|nên|đề\s*xuất|gợi\s*ý|đáng\s*tin)\b/i, label: 'SELLER_RECOMMENDATION' },
   { pattern: /(gợi\s*ý|tìm|tìm\s*giúp|cho\s*tôi)\s+(shop|cửa\s*hàng|seller|nhà\s*bán)\b/i, label: 'SELLER_RECOMMENDATION' },
