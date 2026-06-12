@@ -319,6 +319,9 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       created_at: result.systemMessage.created_at,
     });
 
+    const recipientId = await this.chatService.getOtherParticipant(result.conversationId, userId);
+    if (recipientId) void this.emitUnreadFor(result.conversationId, recipientId);
+
     // Trả về cho buyer: conversationId + thông tin sản phẩm + giá đề xuất
     return { event: 'negotiationStarted', data: result };
   }
@@ -361,6 +364,9 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       },
       created_at: message.created_at,
     });
+
+    const recipientId = await this.chatService.getOtherParticipant(data.conversationId, userId);
+    if (recipientId) void this.emitUnreadFor(data.conversationId, recipientId);
 
     return { event: 'quoteSent', data: { id: message.id } };
   }
@@ -415,6 +421,9 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       quote: null,
       created_at: message.created_at,
     });
+
+    const recipientId = await this.chatService.getOtherParticipant(data.conversationId, userId);
+    if (recipientId) void this.emitUnreadFor(data.conversationId, recipientId);
 
     this.server.to(data.conversationId).emit('negotiationCancelled', {
       conversationId: data.conversationId,

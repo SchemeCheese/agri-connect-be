@@ -493,7 +493,7 @@ export class ChatService {
     );
     const unreadMap = new Map<string, number>(unreadEntries);
 
-    return Promise.all(
+    const result = await Promise.all(
       conversations.map(async (conv) => {
         const partner = conv.user1_id === userId ? conv.user2 : conv.user1;
 
@@ -523,6 +523,12 @@ export class ChatService {
           created_at: conv.created_at,
         };
       }),
+    );
+
+    return result.sort(
+      (left, right) =>
+        new Date(right.lastMessage?.created_at ?? right.created_at).getTime() -
+        new Date(left.lastMessage?.created_at ?? left.created_at).getTime(),
     );
   }
 }

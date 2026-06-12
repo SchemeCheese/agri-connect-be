@@ -234,6 +234,7 @@ export class OrdersService {
         });
 
         this.chatGateway.server.to(conversation.id).emit('quoteAccepted', {
+            messageId: quote.id,
             quoteMessageId: quote.id,
             conversationId: conversation.id,
             orderId: created.orderId,
