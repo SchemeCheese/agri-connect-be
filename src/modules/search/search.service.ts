@@ -13,18 +13,35 @@ export class SearchService {
 
     const keyword = q.trim();
 
-    // ─── 1. Tìm kiếm Shop theo store_name ───────────────────────────────────
-    const shopProfiles = await this.db.profile.findMany({
+    // Tìm shop theo tên shop, tên người bán hoặc sản phẩm đang bán.
+    const shopUsers = await this.db.user.findMany({
       where: {
-        store_name: { contains: keyword, mode: 'insensitive' },
+        is_seller: true,
+        is_active: true,
+        OR: [
+          { full_name: { contains: keyword, mode: 'insensitive' } },
+          { profile: { is: { store_name: { contains: keyword, mode: 'insensitive' } } } },
+          {
+            products: {
+              some: {
+                is_active: true,
+                ...buildProductSearchWhere(keyword),
+              },
+            },
+          },
+        ],
       },
-      include: {
-        user: { select: { id: true, full_name: true } },
+      select: {
+        id: true,
+        full_name: true,
+        profile: {
+          select: { store_name: true, is_verified: true },
+        },
       },
       take: 10,
     });
 
-    const shopIds = shopProfiles.map((p) => p.user_id);
+    const shopIds = shopUsers.map((user) => user.id);
 
     // Lấy avatar + product_count song song
     const [shopAvatars, productCounts] = await Promise.all([
@@ -74,13 +91,15 @@ export class SearchService {
       {} as Record<string, { avg_rating: number; total_reviews: number }>,
     );
 
-    const shops = shopProfiles.map((p) => ({
-      id: p.user_id,
-      store_name: p.store_name || p.user.full_name,
-      avatar_url: avatarMap[p.user_id] ?? null,
-      rating: ratingMap[p.user_id]?.avg_rating ?? 0,
-      total_reviews: ratingMap[p.user_id]?.total_reviews ?? 0,
-      product_count: productCountMap[p.user_id] ?? 0,
+    const shops = shopUsers.map((user) => ({
+      id: user.id,
+      store_name: user.profile?.store_name || user.full_name,
+      owner_name: user.full_name,
+      is_verified: user.profile?.is_verified ?? false,
+      avatar_url: avatarMap[user.id] ?? null,
+      rating: ratingMap[user.id]?.avg_rating ?? 0,
+      total_reviews: ratingMap[user.id]?.total_reviews ?? 0,
+      product_count: productCountMap[user.id] ?? 0,
     }));
 
     // ─── 2. Tìm kiếm Sản phẩm — DÙNG CHUNG builder với GET /products/search ──

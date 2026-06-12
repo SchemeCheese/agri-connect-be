@@ -1,11 +1,14 @@
 import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { DatabaseService } from '../../database/database.service';
 import { OrderStatus, Prisma, ProductStatus, TrustStatus } from '@prisma/client';
+import { buildProductSearchWhere } from '../../common/utils/vietnamese-search.util';
 
 const num = (v: string | undefined, def: number) => {
   const n = Number(v);
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : def;
 };
+
+type AdminUserRoleFilter = 'BUYER' | 'SELLER' | 'ADMIN';
 
 @Injectable()
 export class AdminService {
@@ -72,20 +75,28 @@ export class AdminService {
   }
 
   // ─── User management ─────────────────────────────────────────────────────
-  async listUsers(opts: { page?: string; limit?: string; search?: string }) {
+  async listUsers(opts: { page?: string; limit?: string; search?: string; role?: string }) {
     const page = num(opts.page, 1);
     const limit = Math.min(num(opts.limit, 20), 100);
     const search = opts.search?.trim();
+    const role = opts.role?.toUpperCase() as AdminUserRoleFilter | undefined;
 
-    const where: Prisma.UserWhereInput = search
-      ? {
-          OR: [
-            { full_name: { contains: search, mode: 'insensitive' } },
-            { email: { contains: search, mode: 'insensitive' } },
-            { phone_number: { contains: search, mode: 'insensitive' } },
-          ],
-        }
-      : {};
+    const where: Prisma.UserWhereInput = {
+      ...(role === 'BUYER' ? { is_buyer: true } : {}),
+      ...(role === 'SELLER' ? { is_seller: true } : {}),
+      ...(role === 'ADMIN' ? { is_admin: true } : {}),
+      ...(search
+        ? {
+            OR: [
+              { full_name: { contains: search, mode: 'insensitive' } },
+              { email: { contains: search, mode: 'insensitive' } },
+              { phone_number: { contains: search, mode: 'insensitive' } },
+              { profile: { is: { store_name: { contains: search, mode: 'insensitive' } } } },
+              { products: { some: buildProductSearchWhere(search) } },
+            ],
+          }
+        : {}),
+    };
 
     const [items, total] = await Promise.all([
       this.db.user.findMany({
@@ -203,7 +214,18 @@ export class AdminService {
     const search = opts.search?.trim();
 
     const where: Prisma.ProductWhereInput = {
-      ...(search ? { name: { contains: search, mode: 'insensitive' } } : {}),
+      ...(search
+        ? {
+            OR: [
+              buildProductSearchWhere(search),
+              { category: { name: { contains: search, mode: 'insensitive' } } },
+              { seller: { full_name: { contains: search, mode: 'insensitive' } } },
+              { seller: { email: { contains: search, mode: 'insensitive' } } },
+              { seller: { phone_number: { contains: search, mode: 'insensitive' } } },
+              { seller: { profile: { is: { store_name: { contains: search, mode: 'insensitive' } } } } },
+            ],
+          }
+        : {}),
       ...(opts.status && opts.status in ProductStatus ? { status: opts.status as ProductStatus } : {}),
     };
 

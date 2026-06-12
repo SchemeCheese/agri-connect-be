@@ -34,7 +34,12 @@ import {
   TargetType,
 } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
-import { PERSON_NAMES, SHOP_NAMES, PRODUCT_CATALOG } from './seed-data';
+import {
+  PRIMARY_SEED_PERSON_NAMES,
+  PRIMARY_SEED_SHOP_NAMES,
+  SEED_PRODUCT_ENTRIES,
+  buildSeedProductName,
+} from './seed-data';
 import { removeVietnameseTones } from '../src/common/utils/vietnamese-search.util';
 
 const prisma = new PrismaClient();
@@ -45,11 +50,11 @@ const SEED_NAME_PREFIX = '[SEED] ';
 const EMAIL_DOMAIN = '@agriconnect.test';
 const SEED_PASSWORD = 'Seed@123456';
 
-const N_BUYERS = 25;
-const N_SELLERS = 15;
-const N_HYBRIDS = 5; // vừa BUYER vừa SELLER
-const N_ORDERS = 80; // đơn hàng "thường" (chưa tính đơn từ thương lượng)
-const N_NEGOTIATIONS = 5;
+const N_BUYERS = 8;
+const N_SELLERS = 5;
+const N_HYBRIDS = 2; // vừa BUYER vừa SELLER
+const N_ORDERS = 40; // đơn hàng "thường" (chưa tính đơn từ thương lượng)
+const N_NEGOTIATIONS = 3;
 
 // ─── Danh mục theo yêu cầu (KHÔNG xoá khi cleanup — có thể dùng chung dữ liệu thật) ─
 const CATEGORY_NAMES = [
@@ -300,7 +305,7 @@ async function seed() {
     Array.from({ length: N_BUYERS }, (_, i) => {
       const n = pad(i + 1);
       return prisma.user.create({
-        data: baseUser(`${SEED_EMAIL_PREFIX}buyer${n}${EMAIL_DOMAIN}`, PERSON_NAMES[i % PERSON_NAMES.length], true, false),
+        data: baseUser(`${SEED_EMAIL_PREFIX}buyer${n}${EMAIL_DOMAIN}`, PRIMARY_SEED_PERSON_NAMES[i], true, false),
       });
     }),
   );
@@ -311,10 +316,10 @@ async function seed() {
       const n = pad(i + 1);
       return prisma.user.create({
         data: {
-          ...baseUser(`${SEED_EMAIL_PREFIX}seller${n}${EMAIL_DOMAIN}`, PERSON_NAMES[(i + 5) % PERSON_NAMES.length], false, true),
+          ...baseUser(`${SEED_EMAIL_PREFIX}seller${n}${EMAIL_DOMAIN}`, PRIMARY_SEED_PERSON_NAMES[N_BUYERS + i], false, true),
           profile: {
             create: {
-              store_name: SHOP_NAMES[i % SHOP_NAMES.length],
+              store_name: PRIMARY_SEED_SHOP_NAMES[i],
               address: pick(ADDRESSES, i),
               description: 'Cửa hàng nông sản sạch, cam kết chất lượng.',
               is_verified: true,
@@ -331,10 +336,10 @@ async function seed() {
       const n = pad(i + 1);
       return prisma.user.create({
         data: {
-          ...baseUser(`${SEED_EMAIL_PREFIX}hybrid${n}${EMAIL_DOMAIN}`, PERSON_NAMES[(i + 12) % PERSON_NAMES.length], true, true),
+          ...baseUser(`${SEED_EMAIL_PREFIX}hybrid${n}${EMAIL_DOMAIN}`, PRIMARY_SEED_PERSON_NAMES[N_BUYERS + N_SELLERS + i], true, true),
           profile: {
             create: {
-              store_name: SHOP_NAMES[(i + 6) % SHOP_NAMES.length],
+              store_name: PRIMARY_SEED_SHOP_NAMES[N_SELLERS + i],
               address: pick(ADDRESSES, i + 2),
               description: 'Vừa mua vừa bán — tài khoản demo lưỡng vai.',
               is_verified: true,
@@ -354,27 +359,27 @@ async function seed() {
   const productsBySeller: Record<string, { id: string; price: number; name: string; unit: string }[]> = {};
   for (let s = 0; s < sellingUsers.length; s++) {
     const seller = sellingUsers[s];
-    const catName = CATEGORY_NAMES[s % CATEGORY_NAMES.length];
-    const pool = PRODUCT_CATALOG[catName];
-    const nProducts = 5 + (s % 6); // 5..10
+    const nProducts = 3;
     productsBySeller[seller.id] = [];
 
     for (let p = 0; p < nProducts; p++) {
-      const tpl = pool[p % pool.length];
+      const productIndex = s * nProducts + p;
+      const tpl = SEED_PRODUCT_ENTRIES[productIndex % SEED_PRODUCT_ENTRIES.length];
+      const productName = buildSeedProductName(tpl.name, 'primary', productIndex);
       const stock = 30 + ((s + p) % 20) * 10; // 30..220
       const allowNego = p % 3 === 0; // ~1/3 sản phẩm cho thương lượng
       const product = await prisma.product.create({
         data: {
-          name: tpl.name, // KHÔNG còn tiền tố [SEED] — nhận diện seed qua email người bán
-          search_name: removeVietnameseTones(tpl.name),
-          description: `${tpl.name} — nông sản sạch, cam kết chất lượng.`,
+          name: productName, // nhận diện seed qua email người bán
+          search_name: removeVietnameseTones(productName),
+          description: `${productName} — nông sản sạch, cam kết chất lượng.`,
           reference_price: tpl.price,
           stock_quantity: stock,
           unit: tpl.unit,
           location: pick(ADDRESSES, s),
           certification: allowNego ? 'VietGAP' : null,
           min_negotiation_qty: allowNego ? 10 : null,
-          category_id: categories[catName],
+          category_id: categories[tpl.category],
           seller_id: seller.id,
           is_active: true,
           status: ProductStatus.ACTIVE,
@@ -389,7 +394,7 @@ async function seed() {
           target_type: TargetType.PRODUCT,
         },
       });
-      productsBySeller[seller.id].push({ id: product.id, price: tpl.price, name: tpl.name, unit: tpl.unit });
+      productsBySeller[seller.id].push({ id: product.id, price: tpl.price, name: productName, unit: tpl.unit });
       counts.products++;
     }
   }

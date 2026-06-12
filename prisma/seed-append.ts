@@ -33,7 +33,13 @@ import {
   TargetType,
 } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
-import { CATEGORY_NAMES, PERSON_NAMES, SHOP_NAMES, PRODUCT_CATALOG } from './seed-data';
+import {
+  APPEND_SEED_PERSON_NAMES,
+  APPEND_SEED_SHOP_NAMES,
+  CATEGORY_NAMES,
+  SEED_PRODUCT_ENTRIES,
+  buildSeedProductName,
+} from './seed-data';
 import { removeVietnameseTones } from '../src/common/utils/vietnamese-search.util';
 
 const prisma = new PrismaClient();
@@ -45,11 +51,11 @@ const VOUCHER_PREFIX = 'SEED2'; // marker chỉ ở voucher code, KHÔNG ở tê
 const EMAIL_DOMAIN = '@agriconnect.test';
 const SEED_PASSWORD = 'Seed@123456';
 
-const N_BUYERS = 15;
-const N_SELLERS = 10;
-const N_HYBRIDS = 5;
-const N_ORDERS = 50; // trong khoảng 40–60
-const N_NEGOTIATIONS = 4; // trong khoảng 3–5
+const N_BUYERS = 6;
+const N_SELLERS = 4;
+const N_HYBRIDS = 1;
+const N_ORDERS = 16; // compact demo dataset
+const N_NEGOTIATIONS = 3; // compact demo dataset
 
 // CATEGORY_NAMES + PRODUCT_CATALOG (tên + ảnh khớp) import từ ./seed-data.
 
@@ -154,19 +160,19 @@ async function append() {
   const buyers = await Promise.all(
     Array.from({ length: N_BUYERS }, (_, i) => {
       const n = pad(i + 1);
-      return mkUser(`${NS}-buyer-${n}`, `${EMAIL_PREFIX}buyer${n}${EMAIL_DOMAIN}`, PERSON_NAMES[i % PERSON_NAMES.length], true, false);
+      return mkUser(`${NS}-buyer-${n}`, `${EMAIL_PREFIX}buyer${n}${EMAIL_DOMAIN}`, APPEND_SEED_PERSON_NAMES[i], true, false);
     }),
   );
   const sellers = await Promise.all(
     Array.from({ length: N_SELLERS }, (_, i) => {
       const n = pad(i + 1);
-      return mkUser(`${NS}-seller-${n}`, `${EMAIL_PREFIX}seller${n}${EMAIL_DOMAIN}`, PERSON_NAMES[(i + 5) % PERSON_NAMES.length], false, true);
+      return mkUser(`${NS}-seller-${n}`, `${EMAIL_PREFIX}seller${n}${EMAIL_DOMAIN}`, APPEND_SEED_PERSON_NAMES[N_BUYERS + i], false, true);
     }),
   );
   const hybrids = await Promise.all(
     Array.from({ length: N_HYBRIDS }, (_, i) => {
       const n = pad(i + 1);
-      return mkUser(`${NS}-hybrid-${n}`, `${EMAIL_PREFIX}hybrid${n}${EMAIL_DOMAIN}`, PERSON_NAMES[(i + 12) % PERSON_NAMES.length], true, true);
+      return mkUser(`${NS}-hybrid-${n}`, `${EMAIL_PREFIX}hybrid${n}${EMAIL_DOMAIN}`, APPEND_SEED_PERSON_NAMES[N_BUYERS + N_SELLERS + i], true, true);
     }),
   );
 
@@ -174,7 +180,7 @@ async function append() {
   const sellingUsers = [...sellers, ...hybrids];
   for (let s = 0; s < sellingUsers.length; s++) {
     const u = sellingUsers[s];
-    const shopName = SHOP_NAMES[s % SHOP_NAMES.length];
+    const shopName = APPEND_SEED_SHOP_NAMES[s];
     await prisma.profile.upsert({
       where: { user_id: u.id },
       update: { store_name: shopName, is_verified: true },
@@ -193,42 +199,45 @@ async function append() {
   // Tên hiển thị KHÔNG còn [SEED2] — idempotent vẫn an toàn vì upsert theo id cố định.
   // update path set LẠI name/description ⇒ chạy lại tự xoá tiền tố cũ ở dữ liệu sẵn có.
   const productsBySeller: Record<string, { id: string; price: number; name: string; unit: string }[]> = {};
+  const activeProductIds: string[] = [];
   for (let s = 0; s < sellingUsers.length; s++) {
     const seller = sellingUsers[s];
-    const catName = CATEGORY_NAMES[s % CATEGORY_NAMES.length];
-    const pool = PRODUCT_CATALOG[catName];
-    const nProducts = 5 + (s % 4); // 5..8 (đủ phủ id đã tạo từ các lần chạy trước)
+    const nProducts = 2;
     productsBySeller[seller.id] = [];
 
     for (let p = 0; p < nProducts; p++) {
-      const tpl = pool[p % pool.length];
+      const productIndex = s * nProducts + p;
+      const tpl = SEED_PRODUCT_ENTRIES[productIndex % SEED_PRODUCT_ENTRIES.length];
+      const productName = buildSeedProductName(tpl.name, 'append', productIndex);
       const pid = `${NS}-prod-${pad(s + 1)}-${pad(p + 1)}`;
+      activeProductIds.push(pid);
       const stock = 40 + ((s + p) % 18) * 10;
       const allowNego = p % 3 === 0;
       await prisma.product.upsert({
         where: { id: pid },
         update: {
-          name: tpl.name, // ghi đè tên cũ (gỡ [SEED2])
-          search_name: removeVietnameseTones(tpl.name),
-          description: `${tpl.name} — nông sản sạch, cam kết chất lượng.`,
+          name: productName,
+          search_name: removeVietnameseTones(productName),
+          description: `${productName} — nông sản sạch, cam kết chất lượng.`,
           reference_price: tpl.price,
           unit: tpl.unit,
           stock_quantity: stock,
+          category_id: categories[tpl.category],
           is_active: true,
           status: ProductStatus.ACTIVE,
         },
         create: {
           id: pid,
-          name: tpl.name,
-          search_name: removeVietnameseTones(tpl.name),
-          description: `${tpl.name} — nông sản sạch, cam kết chất lượng.`,
+          name: productName,
+          search_name: removeVietnameseTones(productName),
+          description: `${productName} — nông sản sạch, cam kết chất lượng.`,
           reference_price: tpl.price,
           stock_quantity: stock,
           unit: tpl.unit,
           location: pick(ADDRESSES, s),
           certification: allowNego ? 'VietGAP' : null,
           min_negotiation_qty: allowNego ? 10 : null,
-          category_id: categories[catName],
+          category_id: categories[tpl.category],
           seller_id: seller.id,
           is_active: true,
           status: ProductStatus.ACTIVE,
@@ -248,9 +257,18 @@ async function append() {
         },
       });
 
-      productsBySeller[seller.id].push({ id: pid, price: tpl.price, name: tpl.name, unit: tpl.unit });
+      productsBySeller[seller.id].push({ id: pid, price: tpl.price, name: productName, unit: tpl.unit });
     }
   }
+
+  // Các sản phẩm seed2 dư từ cấu hình cũ vẫn có thể đang được OrderItem tham chiếu.
+  // Chỉ soft-delete để chúng biến mất khỏi tìm kiếm/gian hàng mà không phá lịch sử đơn.
+  await prisma.product.updateMany({
+    where: {
+      id: { startsWith: `${NS}-prod-`, notIn: activeProductIds },
+    },
+    data: { is_active: false, status: ProductStatus.DELETED },
+  });
 
   const productsTouched = Object.values(productsBySeller).reduce((a, arr) => a + arr.length, 0);
   console.log(`   🥬 Sản phẩm seed2: ${productsTouched} (đã set tên thật + 1 ảnh khớp/sp)`);

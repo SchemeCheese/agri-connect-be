@@ -30,8 +30,13 @@ export class AdminController {
   // ─── Users ─────────────────────────────────────────────────────────────
   @ApiOperation({ summary: 'Danh sách user (phân trang + tìm kiếm)', description: 'KHÔNG trả password_hash. Yêu cầu ADMIN.' })
   @Get('users')
-  listUsers(@Query('page') page?: string, @Query('limit') limit?: string, @Query('search') search?: string) {
-    return this.admin.listUsers({ page, limit, search });
+  listUsers(
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+    @Query('search') search?: string,
+    @Query('role') role?: string,
+  ) {
+    return this.admin.listUsers({ page, limit, search, role });
   }
 
   @Get('users/:id/details')

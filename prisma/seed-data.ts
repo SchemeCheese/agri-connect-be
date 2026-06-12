@@ -30,6 +30,38 @@ export const SHOP_NAMES = [
   'Nông trại Hữu Cơ Xanh', 'Vựa Nông Sản Chợ Lớn',
 ];
 
+// Hai bộ seed dùng tên riêng để không tạo danh sách người/shop lặp lại.
+// Khối legacy trong seed-append.ts (khach@gmail.com, shop1..5@gmail.com) không dùng các mảng này.
+export const PRIMARY_SEED_PERSON_NAMES = [
+  'Nguyễn Hải Đăng', 'Trần Gia Hân', 'Lê Đức Anh', 'Phạm Thanh Trúc', 'Hoàng Nhật Minh',
+  'Vũ Ngọc Diệp', 'Đặng Quốc Bảo', 'Bùi Minh Châu', 'Đỗ Anh Khoa', 'Ngô Phương Linh',
+  'Dương Tuấn Kiệt', 'Lý Khánh Vy', 'Phan Hoài Nam', 'Trịnh Thảo Nhi', 'Hồ Quang Huy',
+  'Mai Tú Uyên', 'Cao Thành Công', 'Đinh Bảo Ngọc', 'Tạ Minh Triết', 'Lương Hà My',
+  'Võ Trung Hiếu', 'Chu Ngọc Ánh',
+] as const;
+
+export const APPEND_SEED_PERSON_NAMES = [
+  'Nguyễn Thiên Phúc', 'Trần Yến Nhi', 'Lê Hoàng Sơn', 'Phạm Mỹ Duyên', 'Hoàng Quốc Việt',
+  'Vũ Thanh Tâm', 'Đặng Khải Hoàn', 'Bùi Thu Trang', 'Đỗ Gia Bách', 'Ngô Tường Vi',
+  'Dương Minh Quân', 'Lý Nhã Phương', 'Phan Đình Vũ', 'Trịnh Kim Ngân', 'Hồ Xuân Trường',
+  'Mai Quỳnh Anh', 'Cao Đức Thịnh', 'Đinh Thanh Hà', 'Tạ Quốc Hưng', 'Lương Bích Ngọc',
+  'Võ Minh Tân', 'Chu Thùy Dương', 'Nguyễn Khắc Duy', 'Trần Lam Giang', 'Lê Trọng Nghĩa',
+  'Phạm Hải Yến', 'Hoàng Anh Tú', 'Vũ Khánh Linh', 'Đặng Thành Đạt', 'Bùi Ngọc Mai',
+] as const;
+
+export const PRIMARY_SEED_SHOP_NAMES = [
+  'Vườn Xanh Mộc Châu', 'Nông sản Phù Sa', 'Trang trại An Nhiên', 'Rau sạch Ban Mai',
+  'Nhà vườn Sông Hậu', 'Nông nghiệp Thuận Phát', 'Gian hàng Đồng Quê', 'Hợp tác xã Bình Minh',
+  'Nông trại Gió Cao Nguyên', 'Vật tư Mùa Vàng',
+] as const;
+
+export const APPEND_SEED_SHOP_NAMES = [
+  'Vườn nhà Hương Đất', 'Nông sản Bốn Mùa', 'Trang trại Ánh Dương', 'Rau củ Tươi Mỗi Ngày',
+  'Nhà vườn Phú Quý', 'Nông nghiệp Đại Ngàn', 'Gian hàng Miệt Vườn', 'Hợp tác xã Thành Công',
+  'Nông trại Đồi Gió', 'Vật tư Nhà Nông', 'Vườn hữu cơ Thanh Bình', 'Nông sản Sông Xanh',
+  'Trang trại Hòa Phát', 'Đặc sản Cao Nguyên', 'Nông nghiệp Tân Lập',
+] as const;
+
 export type SeedProduct = { name: string; price: number; unit: string; image: string };
 
 const U = (id: string) => `https://images.unsplash.com/photo-${id}?w=600&q=80&auto=format&fit=crop`;
@@ -73,3 +105,30 @@ export const PRODUCT_CATALOG: Record<string, SeedProduct[]> = {
     { name: 'Ống tưới nhỏ giọt', price: 150000, unit: 'bộ', image: U('1625246333195-78d9c38ad449') },
   ],
 };
+
+export type SeedCatalogEntry = SeedProduct & { category: string };
+
+export const SEED_PRODUCT_ENTRIES: SeedCatalogEntry[] = Object.entries(PRODUCT_CATALOG).flatMap(
+  ([category, products]) => products.map((product) => ({ category, ...product })),
+);
+
+const PRIMARY_PRODUCT_LABELS = [
+  'tuyển chọn', 'thu hoạch trong ngày', 'canh tác hữu cơ', 'chuẩn VietGAP',
+  'loại đặc biệt', 'đóng gói tại vườn', 'mùa vụ mới', 'dành cho gia đình',
+  'chọn lọc loại một', 'nguồn gốc minh bạch', 'gói tiết kiệm', 'chất lượng cao',
+] as const;
+
+const APPEND_PRODUCT_LABELS = [
+  'phiên bản nhà vườn', 'giao nhanh nội thành', 'đóng gói thân thiện', 'dòng cao cấp',
+  'chế biến tối thiểu', 'combo tiện lợi', 'từ vùng nguyên liệu', 'đạt chuẩn an toàn',
+  'lô thu hoạch sớm', 'dành cho bếp Việt', 'đóng gói bán lẻ', 'hàng mới về',
+] as const;
+
+export function buildSeedProductName(
+  baseName: string,
+  source: 'primary' | 'append',
+  index: number,
+) {
+  const labels = source === 'primary' ? PRIMARY_PRODUCT_LABELS : APPEND_PRODUCT_LABELS;
+  return `${baseName} ${labels[index % labels.length]}`;
+}
