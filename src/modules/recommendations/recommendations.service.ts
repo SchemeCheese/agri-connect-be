@@ -69,8 +69,8 @@ const BW = {
   longView: 25, // xem chi tiết > 2 phút
   repeatedView: 20, // xem cùng sản phẩm ≥ 3 lần trong 7 ngày (giá trị TRẦN)
   searchMatch: 15, // từ khoá tìm khớp danh mục/sản phẩm
-  shopClick: 10, // bấm vào hồ sơ shop (CHƯA có event — xem ghi chú dưới)
-  wishlist: 30, // sản phẩm đã lưu/wishlist (CHƯA có model — xem ghi chú dưới)
+  shopClick: 10, // bấm vào hồ sơ shop 
+  wishlist: 30, // sản phẩm đã lưu/wishlist 
 } as const;
 
 const REPEATED_VIEW_CAP = 3;

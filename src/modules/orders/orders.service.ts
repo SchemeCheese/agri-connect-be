@@ -233,6 +233,17 @@ export class OrdersService {
             status: QuoteStatus.ACCEPTED,
         });
 
+        this.chatGateway.server.to(conversation.id).emit('quoteAccepted', {
+            quoteMessageId: quote.id,
+            conversationId: conversation.id,
+            orderId: created.orderId,
+            orderStatus: OrderStatus.PENDING,
+            paymentStatus: PaymentStatus.UNPAID,
+            paymentMethod: dto.paymentMethod,
+            checkoutSessionId: created.sessionId,
+            totalAmount,
+        });
+
         if (dto.paymentMethod === PaymentMethod.MOMO) {
             const momo = await this.paymentsService.createMomoPayment(buyerId, created.sessionId);
                     if (!momo?.payUrl) {
@@ -1415,7 +1426,15 @@ export class OrdersService {
             this.logger.debug(`[emitOrderStatusUpdate] Fetching order...`);
             const order = await this.databaseService.order.findUnique({
                 where: { id: orderId },
-                select: { negotiation_quote_id: true },
+                select: {
+                    negotiation_quote_id: true,
+                    payment_method: true,
+                    checkout_session_id: true,
+                    payments: {
+                        take: 1,
+                        select: { status: true },
+                    },
+                },
             });
 
             this.logger.debug(`[emitOrderStatusUpdate] Order found: ${JSON.stringify(order)}`);
@@ -1449,6 +1468,10 @@ export class OrdersService {
             this.chatGateway.server.to(conversationId).emit('orderStatusUpdated', {
                 orderId,
                 newStatus,
+                orderStatus: newStatus,
+                paymentStatus: order.payments[0]?.status ?? null,
+                paymentMethod: order.payment_method,
+                checkoutSessionId: order.checkout_session_id,
                 timestamp: new Date(),
             });
             this.logger.debug(`[emitOrderStatusUpdate] ✅ Event emitted successfully`);

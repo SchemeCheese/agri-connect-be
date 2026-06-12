@@ -29,6 +29,8 @@ interface MomoIpnPayload {
 export class PaymentsService {
   private readonly logger = new Logger(PaymentsService.name);
   private readonly momoRequestTimeoutMs = Number(process.env.MOMO_HTTP_TIMEOUT_MS ?? 15000);
+  private readonly momoStatusQueryCooldownMs = 10_000;
+  private readonly momoStatusQueryAt = new Map<string, number>();
 
   constructor(private readonly db: DatabaseService) {}
 
@@ -124,6 +126,57 @@ export class PaymentsService {
 
   private signMomoRequest(raw: string, secretKey: string) {
     return crypto.createHmac('sha256', secretKey).update(raw).digest('hex');
+  }
+
+  /**
+   * Reconcile a pending payment directly with MoMo.
+   *
+   * IPN remains primary, but mobile users can return without completing the
+   * browser redirect and temporary callback URLs can be unavailable.
+   */
+  private async reconcileMomoPayment(id: string): Promise<boolean> {
+    const now = Date.now();
+    const lastQueryAt = this.momoStatusQueryAt.get(id) ?? 0;
+    if (now - lastQueryAt < this.momoStatusQueryCooldownMs) return false;
+    this.momoStatusQueryAt.set(id, now);
+
+    try {
+      const { partnerCode, accessKey, secretKey } = this.getMomoConfig();
+      const endpoint =
+        process.env.MOMO_QUERY_ENDPOINT?.trim() ||
+        'https://test-payment.momo.vn/v2/gateway/api/query';
+      const requestId = `${Date.now()}`;
+      const rawSignature =
+        `accessKey=${accessKey}&orderId=${id}&partnerCode=${partnerCode}&requestId=${requestId}`;
+      const signature = this.signMomoRequest(rawSignature, secretKey);
+
+      const { data } = await axios.post(
+        endpoint,
+        { partnerCode, requestId, orderId: id, signature, lang: 'vi' },
+        {
+          headers: { 'Content-Type': 'application/json' },
+          timeout: this.momoRequestTimeoutMs,
+          timeoutErrorMessage: 'MoMo status query timed out',
+        },
+      );
+
+      const resultCode = Number(data?.resultCode);
+      this.logger.log(
+        `[MoMo QUERY] orderId=${id} resultCode=${resultCode} transId=${data?.transId ?? 'n/a'}`,
+      );
+
+      if (resultCode === 0 && data?.transId) {
+        await this.markMomoPaid(id, String(data.transId));
+        return true;
+      }
+    } catch (error: any) {
+      // Keep the status endpoint available when MoMo query is temporarily down.
+      this.logger.warn(
+        `[MoMo QUERY] failed orderId=${id}: ${error?.response?.data?.message ?? error?.message ?? error}`,
+      );
+    }
+
+    return false;
   }
 
   /**
@@ -626,6 +679,10 @@ export class PaymentsService {
       if (session.buyer_id !== buyerId) {
         throw new ForbiddenException('Bạn không sở hữu phiên thanh toán này');
       }
+      if (session.status === CheckoutSessionStatus.PENDING) {
+        const reconciled = await this.reconcileMomoPayment(session.id);
+        if (reconciled) return this.getMomoPaymentStatus(buyerId, id);
+      }
       return {
         orderId: id,
         // session.status: PENDING/PAID/FAILED — FE chỉ check PAID/FAILED.
@@ -645,6 +702,11 @@ export class PaymentsService {
       throw new ForbiddenException('Bạn không sở hữu đơn hàng này');
     }
     const payment = order.payments?.[0];
+    if (payment?.status === PaymentStatus.UNPAID) {
+      const momoId = order.checkout_session_id ?? order.id;
+      const reconciled = await this.reconcileMomoPayment(momoId);
+      if (reconciled) return this.getMomoPaymentStatus(buyerId, id);
+    }
     return {
       orderId: id,
       paymentStatus: payment?.status ?? null,
