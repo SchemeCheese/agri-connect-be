@@ -19,6 +19,7 @@ import { extname, join } from 'path';
 import * as fs from 'fs';
 import { ChatService } from './chat.service';
 import { JwtAuthGuard } from '../auth/decorators/guards/jwt-auth.guard';
+import { persistChatImage } from '../../common/storage/product-image.storage';
 
 // ─── Multer config dành riêng cho ảnh chat ─────────────────────────────────
 const CHAT_UPLOAD_DIR = join(__dirname, '..', '..', '..', 'public', 'uploads', 'chat');
@@ -175,8 +176,8 @@ export class ChatController {
     if (file.size > CHAT_IMAGE_MAX_BYTES) {
       throw new BadRequestException('Ảnh vượt quá 5MB.');
     }
-    // URL public — main.ts đã serve `public/`
-    const url = `/uploads/chat/${file.filename}`;
+    // Firebase URL when configured; otherwise a durable PostgreSQL data URL.
+    const url = await persistChatImage(file);
     return { url, size: file.size, mime: file.mimetype };
   }
 

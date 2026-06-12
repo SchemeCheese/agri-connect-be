@@ -18,14 +18,13 @@ import { Roles } from '../auth/decorators/roles.decorator';
 import { UserRole } from '../auth/decorators/roles.decorator';
 
 @Controller('vouchers')
-@UseGuards(JwtAuthGuard)
 export class VouchersController {
   constructor(private readonly vouchersService: VouchersService) {}
 
   // ─── SELLER ──────────────────────────────────────────────────────────────
 
   /** POST /vouchers — Tạo voucher */
-  @UseGuards(RolesGuard)
+  @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.SELLER)
   @Post()
   async create(@Request() req, @Body() dto: CreateVoucherDto) {
@@ -33,7 +32,7 @@ export class VouchersController {
   }
 
   /** GET /vouchers/mine — Xem danh sách voucher của mình */
-  @UseGuards(RolesGuard)
+  @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.SELLER)
   @Get('mine')
   async getMyVouchers(@Request() req) {
@@ -41,7 +40,7 @@ export class VouchersController {
   }
 
   /** PATCH /vouchers/:id — Sửa voucher */
-  @UseGuards(RolesGuard)
+  @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.SELLER)
   @Patch(':id')
   async update(
@@ -53,7 +52,7 @@ export class VouchersController {
   }
 
   /** DELETE /vouchers/:id — Xóa voucher */
-  @UseGuards(RolesGuard)
+  @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.SELLER)
   @Delete(':id')
   async remove(@Request() req, @Param('id') id: string) {
@@ -69,7 +68,7 @@ export class VouchersController {
   }
 
   /** POST /vouchers/save/:id — Lưu voucher vào ví */
-  @UseGuards(RolesGuard)
+  @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.BUYER)
   @Post('save/:id')
   async saveVoucher(@Request() req, @Param('id') id: string) {
@@ -77,7 +76,7 @@ export class VouchersController {
   }
 
   /** GET /vouchers/saved — Ví voucher của buyer */
-  @UseGuards(RolesGuard)
+  @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.BUYER)
   @Get('saved')
   async getSavedVouchers(@Request() req) {
@@ -85,6 +84,7 @@ export class VouchersController {
   }
 
   /** POST /vouchers/validate — Kiểm tra và tính tiền giảm */
+  @UseGuards(JwtAuthGuard)
   @Post('validate')
   async validate(@Request() req, @Body() dto: ValidateVoucherDto) {
     return this.vouchersService.validateVoucher(req.user.sub, dto);

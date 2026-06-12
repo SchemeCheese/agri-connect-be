@@ -1,5 +1,6 @@
 ﻿import { Injectable, ForbiddenException, NotFoundException, BadRequestException } from '@nestjs/common';
 import { MessageType } from '@prisma/client';
+import { isManagedChatImageUrl } from '../../common/storage/product-image.storage';
 import { DatabaseService } from '../../database/database.service';
 
 @Injectable()
@@ -269,8 +270,8 @@ export class ChatService {
     if (!imageUrl?.trim()) {
       throw new BadRequestException('Thiếu imageUrl.');
     }
-    // Chỉ chấp nhận URL nội bộ /uploads/chat/* để chống abuse (avatar, ảnh ngoài...)
-    if (!imageUrl.startsWith('/uploads/chat/')) {
+    // Only accept legacy chat paths or values produced by the managed image store.
+    if (!isManagedChatImageUrl(imageUrl)) {
       throw new BadRequestException('imageUrl không hợp lệ.');
     }
 
