@@ -759,6 +759,12 @@ export class OrdersService {
                         phone_number: true,
                     },
                 },
+                dispute: {
+                    select: {
+                        id: true,
+                        status: true,
+                    },
+                },
             },
             orderBy: { created_at: 'desc' },
         });

@@ -1,9 +1,11 @@
-import { IsNotEmpty, IsString, IsNumber, IsOptional, Min } from 'class-validator';
+import { IsBoolean, IsNotEmpty, IsString, IsNumber, IsOptional, Min } from 'class-validator';
 import { Type, Transform } from 'class-transformer';
 
 // Multipart submissions deliver empty inputs as '' instead of omitting them — collapse to
 // undefined so @IsOptional/@Type(() => Number) work the same as a JSON payload would.
 const emptyStringToUndefined = ({ value }: { value: unknown }) => (value === '' ? undefined : value);
+const multipartBoolean = ({ value }: { value: unknown }) =>
+  value === true || value === 'true';
 
 export class CreateProductDto {
   @IsNotEmpty({ message: 'Tên sản phẩm không được để trống' })
@@ -56,4 +58,13 @@ export class CreateProductDto {
   @IsOptional()
   @IsString({ each: true })
   image_urls?: string[];
+
+  @IsOptional()
+  @IsString({ each: true })
+  retained_image_urls?: string[];
+
+  @IsOptional()
+  @Transform(multipartBoolean)
+  @IsBoolean()
+  replace_images?: boolean;
 }

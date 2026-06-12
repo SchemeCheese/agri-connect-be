@@ -1,4 +1,4 @@
-import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { DatabaseService } from '../../database/database.service';
 import { OrderStatus, Prisma, ProductStatus, TrustStatus } from '@prisma/client';
 
@@ -30,7 +30,7 @@ export class AdminService {
 
   // ─── Dashboard analytics ─────────────────────────────────────────────────
   async dashboard() {
-    const [totalUsers, buyers, sellers, admins, activeProducts, totalProducts, completedOrders, totalOrders, pendingShops, openDisputes] =
+    const [totalUsers, buyers, sellers, admins, activeProducts, totalProducts, completedOrders, totalOrders, unverifiedShopCount, openDisputes] =
       await Promise.all([
         this.db.user.count(),
         this.db.user.count({ where: { is_buyer: true } }),
@@ -40,7 +40,15 @@ export class AdminService {
         this.db.product.count(),
         this.db.order.count({ where: { status: OrderStatus.COMPLETED } }),
         this.db.order.count(),
-        this.db.profile.count({ where: { is_verified: false } }),
+        this.db.user.count({
+          where: {
+            is_seller: true,
+            OR: [
+              { profile: { is: null } },
+              { profile: { is: { is_verified: false } } },
+            ],
+          },
+        }),
         this.db.dispute.count({ where: { status: { in: ['PENDING_SELLER_RESPONSE', 'UNDER_ADMIN_REVIEW'] } } }),
       ]);
 
@@ -57,7 +65,8 @@ export class AdminService {
       products: { active: activeProducts, total: totalProducts },
       orders: { total: totalOrders, completed: completedOrders, byStatus: ordersByStatus },
       revenue: Number(revenueAgg._sum.final_total_price ?? 0),
-      pendingShops,
+      unverifiedShops: unverifiedShopCount,
+      pendingShops: unverifiedShopCount,
       openDisputes,
     };
   }
@@ -114,30 +123,64 @@ export class AdminService {
     });
   }
 
-  // ─── Seller / shop approval ──────────────────────────────────────────────
-  async listPendingShops() {
-    return this.db.profile.findMany({
-      where: { is_verified: false, user: { is_seller: true } },
+  // ─── Shop verification badge (independent from seller permissions) ──────
+  async listUnverifiedShops() {
+    const sellers = await this.db.user.findMany({
+      where: {
+        is_seller: true,
+        OR: [
+          { profile: { is: null } },
+          { profile: { is: { is_verified: false } } },
+        ],
+      },
       orderBy: { created_at: 'desc' },
       select: {
         id: true,
-        store_name: true,
-        address: true,
-        description: true,
-        shop_location_name: true,
-        shop_google_maps_url: true,
+        email: true,
+        full_name: true,
         created_at: true,
-        user: { select: { id: true, email: true, full_name: true } },
+        profile: {
+          select: {
+            id: true,
+            store_name: true,
+            address: true,
+            description: true,
+            shop_location_name: true,
+            shop_google_maps_url: true,
+            created_at: true,
+          },
+        },
       },
     });
+
+    return sellers.map((seller) => ({
+      id: seller.profile?.id ?? seller.id,
+      store_name: seller.profile?.store_name ?? null,
+      address: seller.profile?.address ?? null,
+      description: seller.profile?.description ?? null,
+      shop_location_name: seller.profile?.shop_location_name ?? null,
+      shop_google_maps_url: seller.profile?.shop_google_maps_url ?? null,
+      created_at: seller.profile?.created_at ?? seller.created_at,
+      user: {
+        id: seller.id,
+        email: seller.email,
+        full_name: seller.full_name,
+      },
+    }));
   }
 
   async verifyShop(userId: string, isVerified: boolean) {
-    const profile = await this.db.profile.findUnique({ where: { user_id: userId } });
-    if (!profile) throw new NotFoundException('Shop / hồ sơ không tồn tại.');
-    return this.db.profile.update({
+    const seller = await this.db.user.findUnique({
+      where: { id: userId },
+      select: { id: true, is_seller: true },
+    });
+    if (!seller) throw new NotFoundException('Người dùng không tồn tại.');
+    if (!seller.is_seller) throw new BadRequestException('Chỉ tài khoản người bán mới có thể được xác minh shop.');
+
+    return this.db.profile.upsert({
       where: { user_id: userId },
-      data: { is_verified: isVerified },
+      update: { is_verified: isVerified },
+      create: { user_id: userId, is_verified: isVerified },
       select: { id: true, store_name: true, is_verified: true },
     });
   }

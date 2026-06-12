@@ -49,16 +49,22 @@ export class AdminController {
     return result;
   }
 
-  // ─── Seller / shop approval ────────────────────────────────────────────
+  // ─── Shop verification (badge only, does not gate seller permissions) ──
+  @Get('shops/unverified')
+  unverifiedShops() {
+    return this.admin.listUnverifiedShops();
+  }
+
+  // Backward-compatible alias for older clients.
   @Get('shops/pending')
   pendingShops() {
-    return this.admin.listPendingShops();
+    return this.admin.listUnverifiedShops();
   }
 
   @Patch('shops/:userId/verify')
   async verifyShop(@Request() req, @Param('userId') userId: string, @Body() dto: VerifyShopDto) {
     const result = await this.admin.verifyShop(userId, dto.is_verified);
-    await this.admin.writeAudit(req.user.sub, dto.is_verified ? 'APPROVE_SELLER' : 'UNVERIFY_SELLER', userId, {
+    await this.admin.writeAudit(req.user.sub, dto.is_verified ? 'VERIFY_SHOP' : 'UNVERIFY_SHOP', userId, {
       is_verified: dto.is_verified,
     });
     return result;

@@ -13,6 +13,7 @@ import {
   removeVietnameseTones,
   buildProductSearchWhere,
 } from '../../common/utils/vietnamese-search.util';
+import { persistProductImages } from '../../common/storage/product-image.storage';
 
 // Best-effort cleanup of files multer dropped on disk before the handler ran.
 // Used when create/update fails after multer has already persisted the upload —
@@ -136,7 +137,7 @@ export class ProductsService {
       const payload = await this.normalizePayload(dto);
 
       const initialStatus = deriveStockStatus(payload.stock_quantity);
-      const uploadedUrls = files.map((file) => `/uploads/products/${file.filename}`);
+      const uploadedUrls = await persistProductImages(files);
       const allUrls = [...payload.image_urls, ...uploadedUrls];
 
       // product + attachments commit together. If attachment.createMany throws,
@@ -351,7 +352,7 @@ export class ProductsService {
           select: {
             id: true,
             full_name: true,
-            profile: { select: { store_name: true } },
+            profile: { select: { store_name: true, is_verified: true } },
           },
         },
       },
@@ -409,6 +410,7 @@ export class ProductsService {
           id: p.seller_id,
           store_name: p.seller?.profile?.store_name || p.seller.full_name,
           avatar_url: avatarMap[p.seller_id] ?? null,
+          isVerified: p.seller?.profile?.is_verified ?? false,
         },
         rating: 5,
         reviewCount: 0,
@@ -530,6 +532,7 @@ export class ProductsService {
         store_name: p.seller?.profile?.store_name || p.seller.full_name,
         avatar_url: shopAvatar?.url || null,
         location: p.seller?.profile?.address || null,
+        isVerified: p.seller?.profile?.is_verified ?? false,
         rating: 4.8,
         responseRate: '98%',
         followers: 120,
@@ -579,8 +582,10 @@ export class ProductsService {
 
       const appendedUrls = [
         ...this.normalizeImageUrls(dto.image_urls as any),
-        ...files.map((file) => `/uploads/products/${file.filename}`),
+        ...(await persistProductImages(files)),
       ];
+      const retainedUrls = this.normalizeImageUrls(dto.retained_image_urls as any);
+      const finalImageUrls = [...new Set([...retainedUrls, ...appendedUrls])];
 
       const updated = await this.db.$transaction(async (tx) => {
         const next = await tx.product.update({
@@ -604,9 +609,19 @@ export class ProductsService {
           },
         });
 
-        if (appendedUrls.length > 0) {
+        if (dto.replace_images) {
+          await tx.attachment.deleteMany({
+            where: {
+              target_id: productId,
+              target_type: TargetType.PRODUCT,
+            },
+          });
+        }
+
+        const urlsToInsert = dto.replace_images ? finalImageUrls : appendedUrls;
+        if (urlsToInsert.length > 0) {
           await tx.attachment.createMany({
-            data: appendedUrls.map((url) => ({
+            data: urlsToInsert.map((url) => ({
               url,
               file_type: 'IMAGE',
               target_id: productId,
