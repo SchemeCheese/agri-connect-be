@@ -18,6 +18,12 @@ const num = (v: string | undefined, def: number) => {
 
 const PARTY_SELECT = { select: { id: true, full_name: true, email: true } };
 
+const cleanEvidenceImages = (images?: string[]) =>
+  (images ?? [])
+    .map((url) => url.trim())
+    .filter(Boolean)
+    .slice(0, 6);
+
 @Injectable()
 export class DisputeService {
   private readonly logger = new Logger(DisputeService.name);
@@ -52,7 +58,7 @@ export class DisputeService {
           buyer_id: order.buyer_id,
           seller_id: order.seller_id,
           buyer_reason: dto.reason,
-          buyer_images: dto.images ?? [],
+          buyer_images: cleanEvidenceImages(dto.images ?? dto.image_urls),
           buyer_video: dto.video ?? null,
           status: DisputeStatus.PENDING_SELLER_RESPONSE,
         },
@@ -79,7 +85,7 @@ export class DisputeService {
       where: { id: disputeId },
       data: {
         seller_explanation: dto.explanation,
-        seller_images: dto.images ?? [],
+        seller_images: cleanEvidenceImages(dto.images ?? dto.image_urls),
         seller_video: dto.video ?? null,
         status: DisputeStatus.UNDER_ADMIN_REVIEW,
       },
@@ -178,6 +184,20 @@ export class DisputeService {
     const isRefundAction =
       dto.action_taken === ResolutionAction.REFUND_BUYER || dto.action_taken === ResolutionAction.PARTIAL_REFUND;
     const order = dispute.order;
+    const orderTotal = Math.round(Number(order.final_total_price));
+    const refundAmount =
+      dto.action_taken === ResolutionAction.PARTIAL_REFUND
+        ? Math.floor(Number(dto.refund_amount ?? 0))
+        : orderTotal;
+
+    if (dto.action_taken === ResolutionAction.PARTIAL_REFUND) {
+      if (!Number.isFinite(refundAmount) || refundAmount <= 0) {
+        throw new BadRequestException('Vui lòng nhập số tiền hoàn một phần.');
+      }
+      if (refundAmount >= orderTotal) {
+        throw new BadRequestException('Hoàn một phần phải nhỏ hơn tổng giá trị đơn hàng.');
+      }
+    }
     const reason = dto.admin_notes?.trim() || 'Admin phán quyết hoàn tiền cho người mua.';
 
     // COD refund = KHÔNG gọi API MoMo, chỉ đổi trạng thái (RETURNED) + hoàn kho.
@@ -230,12 +250,12 @@ export class DisputeService {
     if (isRefundAction && hasOnlinePaid) {
       try {
         if (order.checkout_session_id) {
-          await this.payments.refundPayment(order.checkout_session_id, Number(order.final_total_price), {
+          await this.payments.refundPayment(order.checkout_session_id, refundAmount, {
             orderId: dispute.order_id,
             reason,
           });
         } else {
-          await this.payments.refundMomoTransaction(dispute.order_id, Number(order.final_total_price), reason);
+          await this.payments.refundMomoTransaction(dispute.order_id, refundAmount, reason);
         }
       } catch (err) {
         this.logger.error(
@@ -256,6 +276,7 @@ export class DisputeService {
             outcome: dto.outcome,
             action_taken: dto.action_taken,
             admin_notes: dto.admin_notes ?? null,
+            refund_amount: isRefundAction ? refundAmount : null,
             order_status: newOrderStatus,
             refund_triggered: isRefundAction && hasOnlinePaid,
           } as Prisma.InputJsonValue,

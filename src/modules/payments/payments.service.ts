@@ -958,11 +958,12 @@ export class PaymentsService {
 
       // 2) Log REFUND record cho từng đơn (đối soát theo số tiền thực của đơn)
       for (const o of targetOrders) {
+        const refundLogAmount = targetOrders.length === 1 ? refundAmount : Number(o.final_total_price);
         await tx.payment.create({
           data: {
             order_id: o.id,
             payer_id: session.buyer_id,
-            amount: Number(o.final_total_price),
+            amount: refundLogAmount,
             payment_method: PaymentMethod.MOMO,
             status: PaymentStatus.REFUNDED,
             payment_type: PaymentType.REFUND,

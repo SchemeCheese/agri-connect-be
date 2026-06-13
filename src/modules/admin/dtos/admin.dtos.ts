@@ -1,4 +1,4 @@
-import { IsArray, IsBoolean, IsEnum, IsIn, IsOptional, IsString, MinLength } from 'class-validator';
+import { IsArray, IsBoolean, IsEnum, IsIn, IsNumber, IsOptional, IsString, Min, MinLength } from 'class-validator';
 import { DisputeOutcome, ResolutionAction, TrustStatus } from '@prisma/client';
 
 export class SetTrustStatusDto {
@@ -43,6 +43,11 @@ export class CreateDisputeDto {
   images?: string[];
 
   @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  image_urls?: string[];
+
+  @IsOptional()
   @IsString()
   video?: string;
 }
@@ -56,6 +61,11 @@ export class SellerRespondDto {
   @IsArray()
   @IsString({ each: true })
   images?: string[];
+
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  image_urls?: string[];
 
   @IsOptional()
   @IsString()
@@ -72,4 +82,9 @@ export class AdjudicateDto {
   @IsOptional()
   @IsString()
   admin_notes?: string;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(1)
+  refund_amount?: number;
 }
